@@ -1,0 +1,9 @@
+bibentry(
+  bibtype = "Manual",
+  title = "DSEMr: Dynamic Structural Equation Models in R",
+  author = person("Marcus", "Harris"),
+  year = "2026",
+  note = "R package version 0.0.1.9000",
+  url = "https://github.com/MarcusHarrisUConn/DSEMr"
+)
+

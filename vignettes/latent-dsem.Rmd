@@ -1,0 +1,23 @@
+---
+title: "Latent-variable DSEM roadmap"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Latent-variable DSEM roadmap}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+The compiler recognizes lavaan-style measurement operators and Mplus-like `BY`
+statements. The estimator does not yet fit dynamic CFA, IRT, or latent SEM.
+
+```{r, eval=FALSE}
+model <- dsem_model("
+  f =~ y1 + y2 + y3
+  f ~ lag(f, 1)
+", time = "time")
+```
+
+Enabling this family requires scale identification, time/person measurement
+invariance policy, latent initial conditions, and parity evidence for the public
+6.25–6.28 and 9.33–9.37 examples.
+

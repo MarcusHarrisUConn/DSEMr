@@ -1,0 +1,26 @@
+---
+title: "Parallel and HPC execution"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Parallel and HPC execution}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+`dsem_compute()` uses scheduler-aware core detection. Independent chains run in
+separate R processes; Rust kernels never call the R API from worker threads.
+
+```{r}
+library(DSEMr)
+dsem_compute()
+```
+
+```{r, eval=FALSE}
+compute <- dsem_compute(workers = 4, backend = "psock", threads = 1)
+fit <- dsem(model, data, chains = 4, compute = compute, seed = 4815)
+```
+
+On Slurm, request resources with `--cpus-per-task` and do not request more DSEMr
+workers than allocated. PBS/TORQUE, SGE, and LSF variables are also recognized
+through `parallelly`.
+

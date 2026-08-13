@@ -1,0 +1,29 @@
+---
+title: "Reproducible Monte Carlo studies"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Reproducible Monte Carlo studies}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+Monte Carlo seeds are derived from the master seed, model identity, and
+replication index. They do not depend on dispatch order.
+
+```{r, eval=FALSE}
+library(DSEMr)
+model <- dsem_model("y ~ lag(y, 1)", time = "time")
+study <- dsem_monte_carlo(
+  model,
+  replications = 100,
+  generator = function(seed) simulate_dsem(n = 150, ar = 0.6, seed = seed),
+  seed = 2026,
+  truth = c("(Intercept)" = 0, lag1_y = 0.6, sigma2 = 1)
+)
+study$summary
+```
+
+The call is not evaluated while building the vignette because a defensible
+simulation study should be run as a separate, archived analysis with adequate
+iterations and computing resources.
+

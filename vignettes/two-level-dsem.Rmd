@@ -1,0 +1,26 @@
+---
+title: "Two-level DSEM roadmap"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Two-level DSEM roadmap}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+Two-level DSEM is a parity target, not a current estimator capability. The
+planned model decomposes within-person dynamics from between-person variation
+in means, lagged effects, covariate effects, and residual variances. Latent
+centering and initial-condition choices must be explicit.
+
+```{r, eval=FALSE}
+model <- dsem_model("
+  level: 1
+    y ~ random(lag(y, 1))
+  level: 2
+    y ~ z
+", id = "person", time = "occasion")
+```
+
+The current `dsem()` correctly rejects this model until examples 9.30–9.37 and
+the associated recovery studies pass.
+

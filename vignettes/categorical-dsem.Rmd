@@ -1,0 +1,21 @@
+---
+title: "Categorical DSEM roadmap"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Categorical DSEM roadmap}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+Binary and ordinal DSEM will use an explicit latent-response probit model. Its
+threshold identification, residual scale, centering, lag interpretation, and
+data augmentation must be verified before estimation is enabled.
+
+```{r, eval=FALSE}
+model <- dsem_model("y ~ lag(y, 1)", family = "binary", time = "time")
+dsem(model, data) # capability error in the current release
+```
+
+See the categorical DSEM source in `research/manifest.csv` for the primary
+interpretation and parity reference.
+

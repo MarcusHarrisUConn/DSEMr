@@ -1,0 +1,20 @@
+---
+title: "Residual DSEM roadmap"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Residual DSEM roadmap}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+RDSEM places dynamic relations on residual processes, distinct from lagging the
+observed outcome. DSEMr records residual-dynamic intent separately in the common
+representation so it cannot be silently treated as ordinary DSEM.
+
+```{r, eval=FALSE}
+model <- dsem_model("y ~ residual(lag(y, 1))", time = "time")
+```
+
+This syntax and its estimator will remain disabled until the published RDSEM
+equations, scripts, and simulations have machine-readable parity records.
+

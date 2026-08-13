@@ -1,0 +1,27 @@
+---
+title: "Migrating supported Mplus-like syntax"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Migrating supported Mplus-like syntax}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+DSEMr implements a clean-room, deliberately limited compatibility language.
+Unsupported statements fail instead of being silently ignored.
+
+```{r}
+library(DSEMr)
+lavaan_model <- dsem_model("y ~ lag(y, 1)", time = "time")
+mplus_model <- mplus_to_dsem("
+  ANALYSIS: TYPE = BAYES;
+  MODEL:
+    %WITHIN%
+    y ON y&1;
+", time = "time")
+identical(lavaan_model$terms, mplus_model$terms)
+```
+
+Compatibility claims are tracked per example in `docs/PARITY.md`; parsing an
+operator is not evidence that its estimator is available.
+

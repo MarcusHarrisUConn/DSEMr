@@ -1,0 +1,38 @@
+Package: DSEMr
+Title: Dynamic Structural Equation Models
+Version: 0.0.1.9000
+Authors@R: 
+    person("Marcus", "Harris", role = c("aut", "cre"),
+           email = "160916588+MarcusHarrisUConn@users.noreply.github.com")
+Description: Provides a clean-room framework for specifying, simulating, and
+    estimating dynamic structural equation models. Models can be expressed
+    with an extension of 'lavaan' syntax or a documented subset of Mplus-like
+    syntax and are compiled to a common intermediate representation. The
+    initial experimental estimator implements Bayesian Gaussian autoregressive
+    models and a Rust numerical kernel, with reproducible process-level
+    parallelism for chains and Monte Carlo studies. Broader model families are
+    represented by the compiler but are rejected by the estimator until their
+    validation gates are complete.
+License: GPL (>= 3)
+URL: https://github.com/MarcusHarrisUConn/DSEMr
+BugReports: https://github.com/MarcusHarrisUConn/DSEMr/issues
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+Depends: R (>= 4.2.0)
+Imports:
+    graphics,
+    lavaan (>= 0.6-20),
+    parallel,
+    parallelly,
+    stats,
+    utils
+Suggests:
+    knitr,
+    rmarkdown,
+    testthat (>= 3.0.0),
+    withr
+VignetteBuilder: knitr
+SystemRequirements: Cargo (Rust's package manager), rustc >= 1.65.0, xz
+Config/rextendr/version: 0.5.0
+Config/roxygen2/version: 8.1.0
+Config/testthat/edition: 3

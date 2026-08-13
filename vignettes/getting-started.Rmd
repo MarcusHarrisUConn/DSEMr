@@ -1,0 +1,28 @@
+---
+title: "Getting started with DSEMr"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting started with DSEMr}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+DSEMr currently validates one intentionally narrow vertical slice: an N=1
+Gaussian AR(1). This vignette demonstrates that slice without implying support
+for later roadmap families.
+
+```{r}
+library(DSEMr)
+dat <- simulate_dsem(n = 100, intercept = 0.2, ar = 0.5, sigma = 0.8, seed = 10)
+model <- dsem_model("y ~ lag(y, 1)", time = "time")
+fit <- dsem(model, dat, chains = 1, iter = 100, warmup = 50, seed = 10)
+coef(fit)
+```
+
+Use longer chains and multiple chains for substantive work. Inspect convergence
+information with `dsem_inspect(fit, "diagnostics")`.
+
