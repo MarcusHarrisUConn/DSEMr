@@ -5,7 +5,9 @@
 #' @return The requested component.
 #' @export
 dsem_inspect <- function(object, what = c("model", "terms", "estimates", "draws",
-                                          "diagnostics", "compute", "versions", "fit")) {
+                                          "diagnostics", "compute", "versions", "fit",
+                                          "random_effects", "random_effects_summary",
+                                          "random_effect_draws")) {
   what <- match.arg(what)
   if (inherits(object, "DSEMmodel")) {
     if (what == "model") return(object)
@@ -15,6 +17,7 @@ dsem_inspect <- function(object, what = c("model", "terms", "estimates", "draws"
   if (!inherits(object, "DSEMfit")) .dsem_abort("`object` must be a DSEMmodel or DSEMfit.")
   if (what == "model") return(object$model)
   if (what == "terms") return(object$model$terms)
+  if (is.null(object[[what]])) .dsem_abort("`%s` is not available for this fitted model.", what)
   object[[what]]
 }
 

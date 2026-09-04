@@ -39,8 +39,8 @@ is used.
 
 ## Foundation tolerances
 
-The current Rust sufficient-statistics kernel must match R within `1e-12`.
+The current scalar and grouped Rust sufficient-statistics kernels must match R
+within `1e-12`.
 Because both engines share the same R sampler, fixed-seed posterior draws must
 match within `1e-12`. Recovery smoke tests use broad tolerances and are not a
 substitute for the planned simulation study.
-

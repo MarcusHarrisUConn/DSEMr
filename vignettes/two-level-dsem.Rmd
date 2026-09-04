@@ -16,10 +16,20 @@ Mplus parity are still gated.
 ```{r, eval=FALSE}
 model <- dsem_model("y ~ lag(y, 1)", id = "person", time = "occasion")
 
+long_data <- simulate_dsem(model, n = 40, clusters = 30, ar = 0.5,
+                           random_sd = c(0.25, 0.08), seed = 91)
+
 fit <- dsem(model, data = long_data, engine = "R")
 coef(fit)
-fit$random_effects
+dsem_inspect(fit, "random_effects_summary")
 ```
+
+Person-specific effects are summarized from every retained MCMC draw rather
+than from the final sampler state. The underlying four-dimensional draw array
+is available through `dsem_inspect(fit, "random_effect_draws")`.
+
+Lags never bridge gaps in `occasion`. For other regular sampling intervals,
+set `metadata = list(time_interval = value)` in `dsem_model()`.
 
 Use this estimator for development and recovery studies only. It has not yet
 passed the Mplus 9.30--9.32 parity gates.

@@ -23,8 +23,9 @@ dsem_monte_carlo(
 
 \item{seed}{Master simulation seed.}
 
-\item{compute}{Compute specification. Replications are currently dispatched
-sequentially; deterministic seeds make future scheduler dispatch invariant.}
+\item{compute}{Compute specification. Independent replications can be
+dispatched across a PSOCK cluster; deterministic seeds make results
+invariant to worker count and job order.}
 
 \item{fit_args}{Named list passed to \code{\link[=dsem]{dsem()}}.}
 

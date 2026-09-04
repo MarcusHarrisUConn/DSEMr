@@ -43,3 +43,25 @@
   invisible(TRUE)
 }
 
+.dsem_lag_pairs <- function(time, interval = 1) {
+  n <- length(time)
+  if (n < 2L) return(list(previous = integer(), current = integer()))
+  if (!is.numeric(interval) || length(interval) != 1L || !is.finite(interval) || interval <= 0) {
+    .dsem_abort("`metadata$time_interval` must be one positive number.")
+  }
+  numeric_time <- if (inherits(time, "Date") || inherits(time, "POSIXt")) {
+    as.numeric(time)
+  } else {
+    suppressWarnings(as.numeric(time))
+  }
+  if (anyNA(numeric_time)) .dsem_abort("The time index must be numeric, Date, or POSIXt.")
+  delta <- diff(numeric_time)
+  if (any(delta <= 0)) .dsem_abort("Time values must be unique and strictly increasing within each cluster.")
+  current <- which(abs(delta - interval) <= sqrt(.Machine$double.eps) * max(1, abs(interval))) + 1L
+  list(previous = current - 1L, current = current)
+}
+
+.dsem_time_interval <- function(model) {
+  interval <- model$metadata$time_interval
+  if (is.null(interval)) 1 else interval
+}

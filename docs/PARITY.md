@@ -6,7 +6,7 @@ Status values are `planned`, `compiler-partial`, `implemented-experimental`, or
 | Reference | Model family | Compiler | Estimator | Evidence | Status |
 |---|---|---|---|---|---|
 | Internal AR(1) | N=1 Gaussian AR(1) | Yes | R + Rust kernel | Recovery and exact kernel tests | implemented-experimental |
-| Internal two-level AR(1) | Gaussian random intercept and AR effect | Yes | R reference | Recovery and deterministic-seed tests | implemented-experimental |
+| Internal two-level AR(1) | Gaussian random intercept and AR effect | Yes | R reference + grouped Rust kernel | Fixed recovery grid, gap tests, and exact kernel tests | implemented-experimental |
 | Mplus 6.23 | N=1 continuous AR(1) | Partial | No | Official public input/output | planned |
 | Mplus 6.24 | N=1 covariate AR(1) | Partial | No | Official public input/output | planned |
 | Mplus 6.25–6.28 | N=1 VAR, CFA, IRT, SEM | Partial | No | Official public input/output | planned |

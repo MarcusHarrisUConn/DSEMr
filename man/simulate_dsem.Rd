@@ -2,7 +2,7 @@
 % Please edit documentation in R/simulate.R
 \name{simulate_dsem}
 \alias{simulate_dsem}
-\title{Simulate an N=1 Gaussian autoregressive process}
+\title{Simulate a Gaussian autoregressive process}
 \usage{
 simulate_dsem(
   model = NULL,
@@ -13,7 +13,11 @@ simulate_dsem(
   burnin = 100L,
   seed = 1L,
   outcome = "y",
-  time = "time"
+  time = "time",
+  clusters = NULL,
+  random_sd = c(0.3, 0.1),
+  random_cor = 0,
+  id = "id"
 )
 }
 \arguments{
@@ -30,10 +34,20 @@ simulate_dsem(
 \item{outcome}{Name of the generated outcome.}
 
 \item{time}{Name of the generated time index.}
+
+\item{clusters}{Optional number of independent individuals. When supplied,
+a two-level process with random intercepts and AR effects is generated.}
+
+\item{random_sd}{Length-two vector containing the random-intercept and
+random-AR standard deviations.}
+
+\item{random_cor}{Correlation between the random intercept and AR effect.}
+
+\item{id}{Name of the generated cluster identifier.}
 }
 \value{
 A data frame in long format.
 }
 \description{
-Simulate an N=1 Gaussian autoregressive process
+Simulate a Gaussian autoregressive process
 }

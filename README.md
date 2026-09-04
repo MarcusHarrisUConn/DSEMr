@@ -106,12 +106,28 @@ Every chain and Monte Carlo replication receives a deterministic seed derived
 from a master seed and stable task identity. Changing the worker count must not
 change the draws for a given task.
 
+## Experimental two-level AR(1)
+
+```r
+model_2l <- dsem_model("y ~ lag(y, 1)", id = "person", time = "occasion")
+dat_2l <- simulate_dsem(model_2l, n = 40, clusters = 30, ar = 0.5,
+                        random_sd = c(0.25, 0.08), seed = 2026)
+fit_2l <- dsem(model_2l, dat_2l, engine = "R")
+
+coef(fit_2l)
+dsem_inspect(fit_2l, "random_effects_summary")
+```
+
+When a time index is supplied, lags are formed only across consecutive values;
+rows separated by a gap are never joined. A different regular interval can be
+declared with `metadata = list(time_interval = value)` when compiling the model.
+
 ## Public API
 
 - `dsem_model()` compiles either syntax into a `DSEMmodel`.
 - `dsem()` estimates a validated model and returns a `DSEMfit`.
 - `mplus_to_dsem()` translates the supported clean-room syntax subset.
-- `simulate_dsem()` generates Gaussian AR(1) data.
+- `simulate_dsem()` generates N=1 or clustered Gaussian AR(1) data.
 - `dsem_monte_carlo()` runs reproducible simulation studies.
 - `dsem_compute()` describes local or scheduler-aware resources.
 - `dsem_inspect()` retrieves model, draw, diagnostic, compute, and version data.

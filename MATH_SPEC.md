@@ -41,20 +41,25 @@ The defaults approximate the published diffuse Mplus priors for regression
 coefficients and univariate residual variance. They remain explicitly marked as
 experimental until public finite-sample comparisons are complete.
 
-## Planned two-level DSEM
+## Experimental two-level Gaussian AR(1)
 
-For person \(i\) at time \(t\), the initial continuous model family is
+The implemented reference sampler currently uses
 
 \[
-y_{it}=\mu_i+\phi_i(y_{i,t-1}-\mu_i)+
-\mathbf{x}_{it}^\top\boldsymbol\beta_i+e_{it},
-\quad e_{it}\sim N(0,\sigma_i^2),
+y_{it}=\alpha_i+\phi_i y_{i,t-1}+e_{it},
+\qquad e_{it}\sim N(0,\sigma^2),
 \]
 
-with transformed or constrained person-specific parameters modeled jointly at
-the between level. The implementation must define latent centering, stationarity,
-initial conditions, missing-time insertion, prior Jacobians, and covariance
-parameterization before this family is enabled.
+with \(\boldsymbol\theta_i=(\alpha_i,\phi_i)^\top\sim
+N(\boldsymbol\mu,\Omega)\). The population mean has a diffuse normal prior,
+\(\Omega\) has an inverse-Wishart prior, and \(\sigma^2\) has an inverse-gamma
+prior. All person-specific posterior draws are retained and summarized.
+
+The likelihood includes only adjacent observations at the declared regular time
+interval. It never constructs a lag across an observed time gap. This model does
+not yet implement latent centering, person-specific residual variances,
+between-level predictors, or Mplus-compatible initial-condition integration;
+those remain parity gates.
 
 ## Planned RDSEM and categorical families
 
@@ -63,4 +68,3 @@ equating residual and observed-variable dynamics. Binary and ordinal outcomes
 will use explicit latent-response/probit parameterization and threshold
 identification. These sections are specifications for planned work, not current
 capability claims.
-

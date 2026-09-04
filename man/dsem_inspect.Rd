@@ -7,7 +7,7 @@
 dsem_inspect(
   object,
   what = c("model", "terms", "estimates", "draws", "diagnostics", "compute", "versions",
-    "fit")
+    "fit", "random_effects", "random_effects_summary", "random_effect_draws")
 )
 }
 \arguments{

@@ -12,4 +12,15 @@
 #' @keywords internal
 dsem_ar_sufficient <- function(x, y, n, p) .Call(wrap__dsem_ar_sufficient, x, y, n, p)
 
+#' Compute sufficient statistics for contiguous groups in a Gaussian model.
+#'
+#' @param x Column-major numeric design matrix.
+#' @param y Numeric response vector.
+#' @param group_sizes Number of consecutive rows in each group.
+#' @param n Total number of rows.
+#' @param p Number of columns.
+#' @return Concatenated group sufficient statistics.
+#' @keywords internal
+dsem_grouped_sufficient <- function(x, y, group_sizes, n, p) .Call(wrap__dsem_grouped_sufficient, x, y, group_sizes, n, p)
+
 # nolint end

@@ -130,7 +130,23 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
   draws <- .dsem_bind_chains(draw_matrices)
   diagnostics <- .dsem_diagnostics(draws)
   estimates <- .dsem_summarize_draws(draws, diagnostics)
-  random_effects <- Reduce(`+`, lapply(chain_results, `[[`, "random_effects")) / chains
+  random_effect_draws <- array(
+    NA_real_,
+    dim = c(dim(chain_results[[1L]]$random_effect_draws), chains),
+    dimnames = c(dimnames(chain_results[[1L]]$random_effect_draws),
+                 list(chain = paste0("chain", chain_ids)))
+  )
+  for (chain in chain_ids) {
+    random_effect_draws[, , , chain] <- chain_results[[chain]]$random_effect_draws
+  }
+  random_effects_summary <- .dsem_summarize_random_effects(random_effect_draws,
+                                                            prepared$ids)
+  random_effects <- matrix(
+    random_effects_summary$mean,
+    nrow = length(prepared$ids), byrow = TRUE,
+    dimnames = list(as.character(prepared$ids),
+                    dimnames(random_effect_draws)$parameter)
+  )
   fitted_values <- numeric(length(prepared$y))
   for (g in seq_along(prepared$groups)) {
     idx <- prepared$groups[[g]]$index
@@ -144,6 +160,8 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
     fitted.values = fitted_values, residuals = prepared$y - fitted_values,
     observed = prepared$y, row_index = prepared$row_index,
     random_effects = random_effects,
+    random_effects_summary = random_effects_summary,
+    random_effect_draws = random_effect_draws,
     fit = list(log_lik = .dsem_loglik(prepared$y, fitted_values, sigma2)),
     elapsed = elapsed, master_seed = seed,
     chain_seeds = vapply(chain_ids, function(i) .dsem_stable_seed(seed, paste(model$hash, "chain", i)), integer(1)),
@@ -167,14 +185,22 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
     if (!is.null(model$time)) rows <- rows[order(data[[model$time]][rows])]
     y <- as.numeric(data[[outcome]][rows])
     if (length(y) < 4L) .dsem_abort("Every cluster must contain at least four ordered observations.")
-    x <- cbind(`(Intercept)` = rep(1, length(y) - 1L), y[-length(y)])
+    pairs <- if (is.null(model$time)) {
+      list(previous = seq_len(length(y) - 1L), current = 2:length(y))
+    } else {
+      .dsem_lag_pairs(data[[model$time]][rows], .dsem_time_interval(model))
+    }
+    if (!length(pairs$current)) {
+      .dsem_abort("Cluster `%s` has no consecutive observations at the requested time interval.", ids[g])
+    }
+    x <- cbind(`(Intercept)` = rep(1, length(pairs$current)), y[pairs$previous])
     colnames(x)[2L] <- paste0("lag1_", outcome)
-    response <- y[-1L]
+    response <- y[pairs$current]
     keep <- stats::complete.cases(cbind(response, x))
     groups[[g]] <- list(x = x[keep, , drop = FALSE], y = response[keep],
                         index = length(all_y) + seq_len(sum(keep)))
     all_y <- c(all_y, response[keep])
-    kept_rows <- c(kept_rows, rows[-1L][keep])
+    kept_rows <- c(kept_rows, rows[pairs$current][keep])
   }
   if (length(all_y) < 2L * length(ids) + 2L) .dsem_abort("Too few complete lagged observations for two-level estimation.")
   list(groups = groups, y = all_y, row_index = kept_rows, ids = ids,
@@ -194,6 +220,7 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
   G <- length(groups); p <- 2L
   pooled_x <- do.call(rbind, lapply(groups, `[[`, "x"))
   pooled_y <- unlist(lapply(groups, `[[`, "y"), use.names = FALSE)
+  sufficient <- .dsem_grouped_sufficient_R(groups)
   mu <- as.numeric(stats::coef(stats::lm.fit(pooled_x, pooled_y)))
   if (any(!is.finite(mu))) mu <- rep(0, p)
   theta <- matrix(rep(mu, each = G), nrow = G)
@@ -204,13 +231,17 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
                   dimnames = list(NULL, c("(Intercept)", lag_name, "tau_intercept",
                                           paste0("tau_", lag_name),
                                           paste0("cov_intercept_", lag_name), "sigma2")))
+  random_effect_draws <- array(
+    NA_real_, dim = c(length(keep_at), G, p),
+    dimnames = list(iteration = NULL, cluster = as.character(prepared$ids),
+                    parameter = c("intercept", lag_name))
+  )
   keep_i <- 0L
   for (i in seq_len(iter)) {
     omega_inv <- solve(omega + diag(1e-10, p))
     for (g in seq_len(G)) {
-      x <- groups[[g]]$x; y <- groups[[g]]$y
-      v <- solve(crossprod(x) / sigma2 + omega_inv)
-      m <- v %*% (crossprod(x, y) / sigma2 + omega_inv %*% mu)
+      v <- solve(sufficient$xtx[, , g] / sigma2 + omega_inv)
+      m <- v %*% (sufficient$xty[, g] / sigma2 + omega_inv %*% mu)
       theta[g, ] <- as.numeric(m + t(chol(v)) %*% stats::rnorm(p))
     }
     v_mu <- solve(G * omega_inv + diag(1 / prior$beta_sd^2, p))
@@ -220,18 +251,39 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
     scale <- prior$omega_scale + crossprod(centered)
     omega <- solve(stats::rWishart(1L, prior$omega_df + G, solve(scale))[, , 1L])
     rss <- sum(vapply(seq_len(G), function(g) {
-      sum((groups[[g]]$y - groups[[g]]$x %*% theta[g, ])^2)
+      sufficient$yty[g] - 2 * sum(theta[g, ] * sufficient$xty[, g]) +
+        as.numeric(crossprod(theta[g, ], sufficient$xtx[, , g] %*% theta[g, ]))
     }, numeric(1)))
     sigma2 <- 1 / stats::rgamma(1L, prior$sigma_shape + length(pooled_y) / 2,
                                 rate = prior$sigma_scale + rss / 2)
     if (i %in% keep_at) {
       keep_i <- keep_i + 1L
       draws[keep_i, ] <- c(mu, sqrt(diag(omega)), omega[1L, 2L], sigma2)
+      random_effect_draws[keep_i, , ] <- theta
     }
   }
-  rownames(theta) <- as.character(prepared$ids)
-  colnames(theta) <- c("intercept", paste0("lag1_", prepared$outcome))
-  list(draws = draws, random_effects = theta)
+  list(draws = draws, random_effect_draws = random_effect_draws)
+}
+
+.dsem_summarize_random_effects <- function(draws, ids) {
+  parameters <- dimnames(draws)$parameter
+  rows <- vector("list", length(ids) * length(parameters))
+  k <- 0L
+  for (g in seq_along(ids)) {
+    for (p in seq_along(parameters)) {
+      k <- k + 1L
+      values <- as.numeric(draws[, g, p, ])
+      rows[[k]] <- data.frame(
+        id = ids[g], parameter = parameters[p], mean = mean(values),
+        sd = stats::sd(values),
+        q2.5 = stats::quantile(values, 0.025, names = FALSE),
+        q50 = stats::quantile(values, 0.5, names = FALSE),
+        q97.5 = stats::quantile(values, 0.975, names = FALSE),
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  do.call(rbind, rows)
 }
 
 .dsem_prepare_ar1 <- function(model, data) {
@@ -249,18 +301,26 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
   d <- data[ord, , drop = FALSE]
   y <- as.numeric(d[[outcome]])
   if (length(y) < 4L) .dsem_abort("At least four ordered observations are required.")
-  x <- cbind(`(Intercept)` = rep(1, length(y) - 1L), y[-length(y)])
+  pairs <- if (is.null(model$time)) {
+    list(previous = seq_len(length(y) - 1L), current = 2:length(y))
+  } else {
+    .dsem_lag_pairs(d[[model$time]], .dsem_time_interval(model))
+  }
+  if (!length(pairs$current)) {
+    .dsem_abort("No consecutive observations exist at the requested time interval.")
+  }
+  x <- cbind(`(Intercept)` = rep(1, length(pairs$current)), y[pairs$previous])
   colnames(x)[2L] <- paste0("lag1_", outcome)
-  response <- y[-1L]
+  response <- y[pairs$current]
   if (length(contemporaneous)) {
-    covars <- as.matrix(d[-1L, contemporaneous, drop = FALSE])
+    covars <- as.matrix(d[pairs$current, contemporaneous, drop = FALSE])
     storage.mode(covars) <- "double"
     x <- cbind(x, covars)
   }
   keep <- stats::complete.cases(cbind(response, x))
   if (sum(keep) < ncol(x) + 2L) .dsem_abort("Too few complete lagged observations for this model.")
   list(x = x[keep, , drop = FALSE], y = response[keep],
-       row_index = ord[-1L][keep], outcome = outcome)
+       row_index = ord[pairs$current][keep], outcome = outcome)
 }
 
 .dsem_fit_chain_task <- function(chain_id, payload) {
@@ -278,6 +338,34 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
 .dsem_ar_sufficient_R <- function(x, y) {
   list(xtx = crossprod(x), xty = as.numeric(crossprod(x, y)),
        yty = sum(y * y), n = nrow(x), p = ncol(x))
+}
+
+.dsem_grouped_sufficient_R <- function(groups) {
+  p <- ncol(groups[[1L]]$x)
+  count <- length(groups)
+  xtx <- array(NA_real_, c(p, p, count))
+  xty <- matrix(NA_real_, p, count)
+  yty <- numeric(count)
+  for (g in seq_len(count)) {
+    stats <- .dsem_ar_sufficient_R(groups[[g]]$x, groups[[g]]$y)
+    xtx[, , g] <- stats$xtx
+    xty[, g] <- stats$xty
+    yty[g] <- stats$yty
+  }
+  list(xtx = xtx, xty = xty, yty = yty,
+       group_sizes = vapply(groups, function(group) nrow(group$x), integer(1)),
+       groups = count, p = p)
+}
+
+.dsem_grouped_sufficient_rust <- function(groups) {
+  x <- do.call(rbind, lapply(groups, `[[`, "x"))
+  y <- unlist(lapply(groups, `[[`, "y"), use.names = FALSE)
+  sizes <- vapply(groups, function(group) nrow(group$x), integer(1))
+  raw <- dsem_grouped_sufficient(as.numeric(x), y, sizes,
+                                 as.integer(nrow(x)), as.integer(ncol(x)))
+  raw$xtx <- array(raw$xtx, c(raw$p, raw$p, raw$groups))
+  raw$xty <- matrix(raw$xty, nrow = raw$p, ncol = raw$groups)
+  raw
 }
 
 .dsem_gibbs_chain <- function(sufficient, iter, warmup, thin, prior, seed, names) {
