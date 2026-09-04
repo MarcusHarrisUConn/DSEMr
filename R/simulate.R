@@ -40,8 +40,9 @@ simulate_dsem <- function(model = NULL, n = 200L, intercept = 0, ar = 0.5,
 #' @param replications Number of simulation replications.
 #' @param generator Function called as `generator(seed = <derived seed>)`.
 #' @param seed Master simulation seed.
-#' @param compute Compute specification. Replications are currently dispatched
-#'   sequentially; deterministic seeds make future scheduler dispatch invariant.
+#' @param compute Compute specification. Independent replications can be
+#'   dispatched across a PSOCK cluster; deterministic seeds make results
+#'   invariant to worker count and job order.
 #' @param fit_args Named list passed to [dsem()].
 #' @param truth Optional named vector of true parameter values.
 #' @return A `DSEMmontecarlo` list with replication estimates and summaries.
@@ -67,7 +68,16 @@ dsem_monte_carlo <- function(model, replications = 100L,
                converged = all(is.na(fit$diagnostics$rhat) | fit$diagnostics$rhat < 1.1),
                stringsAsFactors = FALSE)
   }
-  estimates <- do.call(rbind, lapply(seq_len(replications), run_one))
+  ids <- seq_len(replications)
+  estimates <- if (compute$backend == "psock" && compute$workers > 1L &&
+                   replications > 1L) {
+    cl <- parallel::makePSOCKcluster(min(compute$workers, replications))
+    on.exit(parallel::stopCluster(cl), add = TRUE)
+    parallel::parLapply(cl, ids, run_one)
+  } else {
+    lapply(ids, run_one)
+  }
+  estimates <- do.call(rbind, estimates)
   summary <- stats::aggregate(cbind(mean, sd) ~ parameter, estimates, mean)
   names(summary)[names(summary) == "mean"] <- "mean_estimate"
   if (!is.null(truth)) {
