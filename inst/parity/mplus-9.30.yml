@@ -1,0 +1,34 @@
+id: mplus-9.30
+title: Two-level continuous AR(1) with random intercept, AR slope, and residual variance
+source: https://www.statmodel.com/usersguide/chapter9.shtml
+accessed: 2026-09-04
+files:
+  input_sha256: 6aace6639bd56738f105b658cce45b20d420be2b74272f66be1a54afc9d620d1
+  data_sha256: e2028850368989ed05b0d93e6b45549b03a63558f41ca76039209f89d7569fcd
+  output_sha256: 7d2c2042f8d74b5e4374f10b47ddf721da1c1f954501dc0a037492363e4412d6
+target_output:
+  population_ar_mean: 0.297
+  population_ar_sd: 0.014
+  population_ar_ci: [0.270, 0.325]
+  residual_ar_variance: 0.010
+  residual_ar_variance_sd: 0.004
+required_semantics:
+  - time interval of one
+  - random intercept
+  - random AR(1) slope
+  - random log residual variance
+  - between-level predictor w for intercept, AR slope, and log residual variance
+  - between-level outcome z regressed on all three random effects
+  - unstructured covariance among random effects
+dsemr_status: blocked-by-missing-capabilities
+implemented_components:
+  - gap-safe person-specific AR(1) lags
+  - random intercept and random AR(1) effect
+  - joint random intercept and AR covariance
+missing_components:
+  - random log residual variance
+  - between-level predictors of random effects
+  - between-level outcome regression
+  - three-dimensional random-effect covariance
+  - documented Mplus default-prior mapping
+acceptance_rule: Posterior estimates must agree within two combined MCSEs after semantic parity is complete.

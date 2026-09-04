@@ -10,7 +10,8 @@ Status values are `planned`, `compiler-partial`, `implemented-experimental`, or
 | Mplus 6.23 | N=1 continuous AR(1) | Partial | No | Official public input/output | planned |
 | Mplus 6.24 | N=1 covariate AR(1) | Partial | No | Official public input/output | planned |
 | Mplus 6.25–6.28 | N=1 VAR, CFA, IRT, SEM | Partial | No | Official public input/output | planned |
-| Mplus 9.30–9.32 | Two-level continuous DSEM | Partial | No | Official public input/output | planned |
+| [Mplus 9.30](../inst/parity/mplus-9.30.yml) | Random intercept, AR slope, and log residual variance | Partial | No | Official input/data/output checksums and target estimates | compiler-partial |
+| Mplus 9.31–9.32 | Two-level continuous DSEM | Partial | No | Official public input/output | planned |
 | Mplus 9.33–9.37 | Measurement and random-parameter DSEM | Partial | No | Official public input/output | planned |
 | Mplus 9.38–9.40 | Cross-classified DSEM | No | No | Official public input/output | planned |
 | Asparouhov & Muthén RDSEM | Residual dynamic SEM | Partial | No | Paper and open scripts | planned |
