@@ -38,6 +38,10 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
   if (chains < 1L) .dsem_abort("`chains` must be positive.")
   if (iter < 4L || warmup < 0L || warmup >= iter) .dsem_abort("Require `0 <= warmup < iter` and at least four iterations.")
   if (thin < 1L) .dsem_abort("`thin` must be positive.")
+  if (!is.null(model$id)) {
+    return(.dsem_fit_two_level(model, data, chains, iter, warmup, thin,
+                               seed, compute, engine, control, call))
+  }
   prepared <- .dsem_prepare_ar1(model, data)
   prior <- utils::modifyList(list(beta_mean = 0, beta_sd = 1e5,
                                   sigma_shape = 0.001, sigma_scale = 0.001), control)
@@ -84,7 +88,6 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
   lagged <- regressions[regressions$lag > 0L, , drop = FALSE]
   reasons <- character()
   if (model$family != "gaussian") reasons <- c(reasons, "only Gaussian outcomes are currently estimable")
-  if (!is.null(model$id)) reasons <- c(reasons, "two-level estimation is not yet enabled")
   if (any(t$op == "=~")) reasons <- c(reasons, "latent measurement models are not yet enabled")
   if (any(t$residual)) reasons <- c(reasons, "RDSEM terms are not yet enabled")
   if (nrow(lagged) != 1L || lagged$lag[1L] != 1L || lagged$lhs[1L] != lagged$rhs[1L]) {
@@ -95,6 +98,140 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
     .dsem_abort("This model compiles but is outside the validated estimator: %s.", paste(unique(reasons), collapse = "; "))
   }
   invisible(TRUE)
+}
+
+.dsem_fit_two_level <- function(model, data, chains, iter, warmup, thin,
+                                seed, compute, engine, control, call) {
+  if (engine == "rust") {
+    .dsem_abort("The validated two-level sampler currently uses the R reference engine; use `engine = \"R\"` or `\"auto\"`.")
+  }
+  prepared <- .dsem_prepare_two_level_ar1(model, data)
+  prior <- utils::modifyList(list(
+    beta_mean = 0, beta_sd = 1e3, sigma_shape = 0.001,
+    sigma_scale = 0.001, omega_df = 4,
+    omega_scale = diag(0.1, 2L)
+  ), control)
+  task <- list(prepared = prepared, iter = iter, warmup = warmup,
+               thin = thin, prior = prior, master_seed = seed,
+               model_hash = model$hash)
+  chain_ids <- seq_len(chains)
+  start <- proc.time()[[3L]]
+  chain_results <- if (compute$backend == "psock" && compute$workers > 1L && chains > 1L) {
+    cl <- parallel::makePSOCKcluster(min(compute$workers, chains))
+    on.exit(parallel::stopCluster(cl), add = TRUE)
+    parallel::parLapply(cl, chain_ids, function(chain_id, payload) {
+      utils::getFromNamespace(".dsem_two_level_chain_task", "DSEMr")(chain_id, payload)
+    }, payload = task)
+  } else {
+    lapply(chain_ids, .dsem_two_level_chain_task, payload = task)
+  }
+  elapsed <- proc.time()[[3L]] - start
+  draw_matrices <- lapply(chain_results, `[[`, "draws")
+  draws <- .dsem_bind_chains(draw_matrices)
+  diagnostics <- .dsem_diagnostics(draws)
+  estimates <- .dsem_summarize_draws(draws, diagnostics)
+  random_effects <- Reduce(`+`, lapply(chain_results, `[[`, "random_effects")) / chains
+  fitted_values <- numeric(length(prepared$y))
+  for (g in seq_along(prepared$groups)) {
+    idx <- prepared$groups[[g]]$index
+    fitted_values[idx] <- as.numeric(prepared$groups[[g]]$x %*% random_effects[g, ])
+  }
+  sigma2 <- estimates$mean[estimates$parameter == "sigma2"]
+  out <- list(
+    call = call, model = model,
+    parameter_table = .dsem_parameter_table(model, estimates),
+    draws = draws, estimates = estimates, diagnostics = diagnostics,
+    fitted.values = fitted_values, residuals = prepared$y - fitted_values,
+    observed = prepared$y, row_index = prepared$row_index,
+    random_effects = random_effects,
+    fit = list(log_lik = .dsem_loglik(prepared$y, fitted_values, sigma2)),
+    elapsed = elapsed, master_seed = seed,
+    chain_seeds = vapply(chain_ids, function(i) .dsem_stable_seed(seed, paste(model$hash, "chain", i)), integer(1)),
+    compute = compute, engine = "R", versions = .dsem_version_manifest(),
+    status = "experimental-two-level-ar1"
+  )
+  class(out) <- c("DSEMfit", "list")
+  out
+}
+
+.dsem_prepare_two_level_ar1 <- function(model, data) {
+  regressions <- model$terms[model$terms$op == "~", , drop = FALSE]
+  outcome <- unique(regressions$lhs)
+  .dsem_validate_data(data, model$id, model$time, outcome)
+  ids <- unique(data[[model$id]])
+  groups <- vector("list", length(ids))
+  kept_rows <- integer()
+  all_y <- numeric()
+  for (g in seq_along(ids)) {
+    rows <- which(data[[model$id]] == ids[g])
+    if (!is.null(model$time)) rows <- rows[order(data[[model$time]][rows])]
+    y <- as.numeric(data[[outcome]][rows])
+    if (length(y) < 4L) .dsem_abort("Every cluster must contain at least four ordered observations.")
+    x <- cbind(`(Intercept)` = rep(1, length(y) - 1L), y[-length(y)])
+    colnames(x)[2L] <- paste0("lag1_", outcome)
+    response <- y[-1L]
+    keep <- stats::complete.cases(cbind(response, x))
+    groups[[g]] <- list(x = x[keep, , drop = FALSE], y = response[keep],
+                        index = length(all_y) + seq_len(sum(keep)))
+    all_y <- c(all_y, response[keep])
+    kept_rows <- c(kept_rows, rows[-1L][keep])
+  }
+  if (length(all_y) < 2L * length(ids) + 2L) .dsem_abort("Too few complete lagged observations for two-level estimation.")
+  list(groups = groups, y = all_y, row_index = kept_rows, ids = ids,
+       outcome = outcome)
+}
+
+.dsem_two_level_chain_task <- function(chain_id, payload) {
+  seed <- .dsem_stable_seed(payload$master_seed,
+                            paste(payload$model_hash, "chain", chain_id))
+  .dsem_gibbs_two_level(payload$prepared, payload$iter, payload$warmup,
+                        payload$thin, payload$prior, seed)
+}
+
+.dsem_gibbs_two_level <- function(prepared, iter, warmup, thin, prior, seed) {
+  set.seed(seed)
+  groups <- prepared$groups
+  G <- length(groups); p <- 2L
+  pooled_x <- do.call(rbind, lapply(groups, `[[`, "x"))
+  pooled_y <- unlist(lapply(groups, `[[`, "y"), use.names = FALSE)
+  mu <- as.numeric(stats::coef(stats::lm.fit(pooled_x, pooled_y)))
+  if (any(!is.finite(mu))) mu <- rep(0, p)
+  theta <- matrix(rep(mu, each = G), nrow = G)
+  omega <- diag(0.1, p); sigma2 <- stats::var(pooled_y) / 2
+  keep_at <- seq.int(warmup + 1L, iter, by = thin)
+  lag_name <- paste0("lag1_", prepared$outcome)
+  draws <- matrix(NA_real_, length(keep_at), 6L,
+                  dimnames = list(NULL, c("(Intercept)", lag_name, "tau_intercept",
+                                          paste0("tau_", lag_name),
+                                          paste0("cov_intercept_", lag_name), "sigma2")))
+  keep_i <- 0L
+  for (i in seq_len(iter)) {
+    omega_inv <- solve(omega + diag(1e-10, p))
+    for (g in seq_len(G)) {
+      x <- groups[[g]]$x; y <- groups[[g]]$y
+      v <- solve(crossprod(x) / sigma2 + omega_inv)
+      m <- v %*% (crossprod(x, y) / sigma2 + omega_inv %*% mu)
+      theta[g, ] <- as.numeric(m + t(chol(v)) %*% stats::rnorm(p))
+    }
+    v_mu <- solve(G * omega_inv + diag(1 / prior$beta_sd^2, p))
+    m_mu <- v_mu %*% (omega_inv %*% colSums(theta) + rep(prior$beta_mean / prior$beta_sd^2, p))
+    mu <- as.numeric(m_mu + t(chol(v_mu)) %*% stats::rnorm(p))
+    centered <- sweep(theta, 2L, mu)
+    scale <- prior$omega_scale + crossprod(centered)
+    omega <- solve(stats::rWishart(1L, prior$omega_df + G, solve(scale))[, , 1L])
+    rss <- sum(vapply(seq_len(G), function(g) {
+      sum((groups[[g]]$y - groups[[g]]$x %*% theta[g, ])^2)
+    }, numeric(1)))
+    sigma2 <- 1 / stats::rgamma(1L, prior$sigma_shape + length(pooled_y) / 2,
+                                rate = prior$sigma_scale + rss / 2)
+    if (i %in% keep_at) {
+      keep_i <- keep_i + 1L
+      draws[keep_i, ] <- c(mu, sqrt(diag(omega)), omega[1L, 2L], sigma2)
+    }
+  }
+  rownames(theta) <- as.character(prepared$ids)
+  colnames(theta) <- c("intercept", paste0("lag1_", prepared$outcome))
+  list(draws = draws, random_effects = theta)
 }
 
 .dsem_prepare_ar1 <- function(model, data) {

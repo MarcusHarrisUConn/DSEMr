@@ -7,7 +7,8 @@ and a Rust numerical backend built with extendr.
 
 > **Current status: experimental foundation release.** The validated estimator
 > currently covers N=1 Gaussian AR(1) models with optional contemporaneous
-> covariates. Two-level, latent-variable, categorical, RDSEM, and
+> covariates and an R-reference two-level Gaussian AR(1) model with random
+> intercepts and autoregressive effects. Latent-variable, categorical, RDSEM, and
 > cross-classified models can be represented by the compiler in part, but are
 > deliberately rejected by `dsem()` until their validation milestones pass.
 > This version is not yet a replacement for Mplus and must not be used to claim
@@ -24,11 +25,11 @@ Monte Carlo studies.
 ## Installation
 
 Source installation currently requires R 4.2 or later and a Rust toolchain with
-Cargo. During private development:
+Cargo:
 
 ```r
 # install.packages("remotes")
-remotes::install_github("MarcusHarrisUConn/DSEMr", auth_token = Sys.getenv("GITHUB_PAT"))
+remotes::install_github("MarcusHarrisUConn/DSEMr")
 ```
 
 Rust crates are pinned and vendored in the source package, so package
@@ -124,7 +125,8 @@ and `plot()` methods are provided for fitted models.
 |---|---:|---:|---|
 | N=1 Gaussian AR(1) | Yes | Experimental | Internal recovery tests |
 | N=1 multivariate VAR/DSEM | Partial | No | Mplus 6.23–6.28 |
-| Two-level continuous DSEM | Partial | No | Mplus 9.30–9.37 |
+| Two-level Gaussian AR(1) | Yes | Experimental R engine | Internal recovery tests |
+| General two-level continuous DSEM | Partial | No | Mplus 9.30–9.37 |
 | Dynamic CFA/SEM | Partial | No | Public latent examples |
 | Binary/ordinal DSEM | Family metadata | No | Public categorical examples |
 | RDSEM | Partial | No | Published RDSEM examples |
@@ -151,4 +153,3 @@ and an update to the parity matrix.
 ## License
 
 GPL-3. See [`LICENSE`](LICENSE).
-

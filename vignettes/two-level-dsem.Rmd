@@ -1,26 +1,25 @@
 ---
-title: "Two-level DSEM roadmap"
+title: "Two-level Gaussian DSEM"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Two-level DSEM roadmap}
+  %\VignetteIndexEntry{Two-level Gaussian DSEM}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
 
-Two-level DSEM is a parity target, not a current estimator capability. The
-planned model decomposes within-person dynamics from between-person variation
-in means, lagged effects, covariate effects, and residual variances. Latent
-centering and initial-condition choices must be explicit.
+The experimental R reference sampler estimates a Gaussian AR(1) with
+person-specific intercepts and autoregressive effects. Population parameters
+and the random-effect covariance are estimated jointly. This is the first
+two-level slice; latent centering, covariates, random residual variances, and
+Mplus parity are still gated.
 
 ```{r, eval=FALSE}
-model <- dsem_model("
-  level: 1
-    y ~ random(lag(y, 1))
-  level: 2
-    y ~ z
-", id = "person", time = "occasion")
+model <- dsem_model("y ~ lag(y, 1)", id = "person", time = "occasion")
+
+fit <- dsem(model, data = long_data, engine = "R")
+coef(fit)
+fit$random_effects
 ```
 
-The current `dsem()` correctly rejects this model until examples 9.30–9.37 and
-the associated recovery studies pass.
-
+Use this estimator for development and recovery studies only. It has not yet
+passed the Mplus 9.30--9.32 parity gates.

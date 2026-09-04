@@ -55,3 +55,25 @@ test_that("standard extractors expose fitted state", {
   expect_equal(dsem_inspect(fit, "model")$hash, fit$model$hash)
   expect_equal(residuals(fit), fit$residuals)
 })
+
+test_that("two-level AR(1) estimates population and cluster dynamics", {
+  set.seed(17)
+  dat <- do.call(rbind, lapply(seq_len(10), function(id) {
+    x <- simulate_dsem(n = 28, intercept = stats::rnorm(1, 0, 0.2),
+                       ar = stats::rnorm(1, 0.45, 0.05), seed = 200 + id)
+    x$id <- id
+    x
+  }))
+  model <- dsem_model(ar1_spec, id = "id", time = "time")
+  fit <- dsem(model, dat, chains = 2, iter = 240, warmup = 120,
+              seed = 71, engine = "R")
+  expect_s3_class(fit, "DSEMfit")
+  expect_equal(fit$status, "experimental-two-level-ar1")
+  expect_equal(nrow(fit$random_effects), 10L)
+  expect_equal(length(fitted(fit)), 10L * 27L)
+  expect_equal(unname(coef(fit)["lag1_y"]), 0.45, tolerance = 0.2)
+  expect_true(all(c("tau_intercept", "tau_lag1_y", "sigma2") %in%
+                    names(coef(fit))))
+  expect_error(dsem(model, dat, chains = 1, iter = 20, warmup = 10,
+                    engine = "rust"), "R reference engine")
+})
