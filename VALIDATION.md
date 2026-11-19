@@ -19,7 +19,8 @@ is used.
   numerical tolerances on fixed inputs.
 - Simulation recovery covers operating conditions over N, T, missingness,
   parameter magnitude, and prior informativeness.
-- Bias, RMSE, credible-interval coverage, convergence, ESS, and MCSE are reported.
+- Bias, RMSE, credible-interval coverage, rank-normalized split-Rhat, bulk and
+  tail ESS, and Monte Carlo standard error of the posterior mean are reported.
 - Public comparisons agree within combined Monte Carlo uncertainty—normally two
   combined MCSEs—with compatible intervals and substantive conclusions.
 - Fixed master seeds produce task-identical results across one, two, and
@@ -44,3 +45,24 @@ within `1e-12`.
 Because both engines share the same R sampler, fixed-seed posterior draws must
 match within `1e-12`. Recovery smoke tests use broad tolerances and are not a
 substitute for the planned simulation study.
+
+Convergence diagnostics use the required `posterior` package on every
+installation: rank-normalized split-Rhat, bulk ESS, tail ESS, and MCSE of the
+posterior mean. MCSE uses raw-draw mean ESS, not rank-normalized bulk ESS.
+Degenerate or nonfinite draws return unavailable diagnostics. A Monte Carlo
+replication is marked converged only with at least two chains, all finite
+Rhat < 1.01, and both ESS measures >= 100 for every parameter. This screening
+rule is not evidence of correctness or sufficient precision for every study.
+
+## Statistical regression tests
+
+- A strong independent normal prior is checked against numerical integration
+  of the observed-regression posterior, catching a coefficient/variance prior
+  mismatch that weak-prior recovery tests can miss.
+- FFBS means and covariances are compared with an independently constructed
+  dense Gaussian posterior, using five sampling-standard-error bounds.
+- The stationary AR conditional is checked by numerical quadrature, and the
+  innovation-variance conditional by joint-density ratios.
+- Latent fitted values are reconstructed from joint state/loading draws.
+- Unsupported Mplus data/model semantics, constraints, malformed controls,
+  nonnumeric data, and invalid time indices must fail explicitly.

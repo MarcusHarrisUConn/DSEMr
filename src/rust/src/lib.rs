@@ -1,14 +1,14 @@
+mod crossclassified;
+mod dynamic_sem;
+mod kalman;
+mod linalg;
+mod rng;
+mod threelevel;
+mod twolevel;
+mod var_n1;
+
 use extendr_api::prelude::*;
 
-/// Compute Gaussian regression sufficient statistics without calling the R API
-/// from worker threads.
-///
-/// @param x Column-major numeric design matrix.
-/// @param y Numeric response vector.
-/// @param n Number of rows.
-/// @param p Number of columns.
-/// @return Internal sufficient-statistics list.
-/// @keywords internal
 #[extendr]
 fn dsem_ar_sufficient(
     x: Vec<f64>,
@@ -33,15 +33,6 @@ fn dsem_ar_sufficient(
     ))
 }
 
-/// Compute sufficient statistics for contiguous groups in a Gaussian model.
-///
-/// @param x Column-major numeric design matrix.
-/// @param y Numeric response vector.
-/// @param group_sizes Number of consecutive rows in each group.
-/// @param n Total number of rows.
-/// @param p Number of columns.
-/// @return Concatenated group sufficient statistics.
-/// @keywords internal
 #[extendr]
 fn dsem_grouped_sufficient(
     x: Vec<f64>,
@@ -80,6 +71,358 @@ fn dsem_grouped_sufficient(
     ))
 }
 
+#[extendr]
+fn dsem_factor_sufficient(
+    y: Vec<f64>,
+    eta: Vec<f64>,
+    n: i32,
+    items: i32,
+    factors: i32,
+) -> std::result::Result<List, Error> {
+    if n <= 0 || items <= 0 || factors <= 0 {
+        return Err(Error::Other(
+            "n, items, and factors must be positive".into(),
+        ));
+    }
+    let n_usize = n as usize;
+    let items_usize = items as usize;
+    let factors_usize = factors as usize;
+    let (ztz, zty, yty, n_obs) =
+        factor_sufficient_kernel(&y, &eta, n_usize, items_usize, factors_usize)
+            .map_err(|message| Error::Other(message.into()))?;
+    let n_obs: Vec<i32> = n_obs.into_iter().map(|value| value as i32).collect();
+
+    Ok(list!(
+        ztz = ztz,
+        zty = zty,
+        yty = yty,
+        n_obs = n_obs,
+        n = n,
+        items = items,
+        factors = factors,
+        design_cols = factors + 1
+    ))
+}
+
+/// Native Rust MCMC kernel for N=1 VAR(p), Covariate, RDSEM, and Categorical Probit DSEM.
+/// dims = [n_time, d, kx, residual_dynamics, prior_mode, iter, warmup, thin, seed]
+/// hyper = [beta_sd, sigma_shape, sigma_scale]
+#[extendr]
+fn dsem_rust_var_n1(
+    y: Vec<f64>,
+    x: Vec<f64>,
+    lags: Vec<i32>,
+    outcome_types: Vec<i32>,
+    dims: Vec<i32>,
+    hyper: Vec<f64>,
+) -> std::result::Result<List, Error> {
+    if dims.len() < 9 || hyper.len() < 3 {
+        return Err(Error::Other("invalid dims or hyper vector length".into()));
+    }
+    let lags_u: Vec<usize> = lags.into_iter().map(|v| v.max(1) as usize).collect();
+    let out = var_n1::mcmc_var_n1(
+        &y,
+        &x,
+        dims[0] as usize,
+        dims[1] as usize,
+        dims[2] as usize,
+        &lags_u,
+        &outcome_types,
+        dims[3] != 0,
+        dims[4],
+        hyper[0],
+        hyper[1],
+        hyper[2],
+        dims[5] as usize,
+        dims[6] as usize,
+        dims[7] as usize,
+        dims[8] as u64,
+    );
+    Ok(list!(
+        draws = out.draws,
+        param_count = out.param_count as i32,
+        fitted_mean = out.fitted_mean,
+        dic = out.dic,
+        pd = out.pd,
+        d_bar = out.d_bar
+    ))
+}
+
+/// Native Rust MCMC kernel for Two-Level Location-Scale DSEM & RDSEM (Mplus 9.30-9.32, 9.37).
+/// dims = [d, kx, kw, kz, latent_center_y, residual_dynamics, prior_mode, iter, warmup, thin, seed]
+/// hyper = [beta_sd, omega_df_add, omega_scale_diag]
+/// masks = concatenated [z_on_re_mask, z_on_w_mask, re_on_w_mask, slope_is_random, has_random_logv, latent_center_x, outcome_types]
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn dsem_rust_twolevel(
+    y: Vec<f64>,
+    x: Vec<f64>,
+    cluster_sizes: Vec<i32>,
+    w: Vec<f64>,
+    z: Vec<f64>,
+    lags: Vec<i32>,
+    masks: Vec<i32>,
+    dims: Vec<i32>,
+    hyper: Vec<f64>,
+) -> std::result::Result<List, Error> {
+    if dims.len() < 11 || hyper.len() < 3 {
+        return Err(Error::Other("invalid twolevel dims/hyper length".into()));
+    }
+    let d = dims[0] as usize;
+    let kx = dims[1] as usize;
+    let kw = dims[2] as usize;
+    let kz = dims[3] as usize;
+    let lags_u: Vec<usize> = lags.into_iter().map(|v| v.max(1) as usize).collect();
+    let n_sl = lags_u.len() * d + kx;
+    let n_slope_entries = d * n_sl;
+
+    // Unpack masks deterministically from tail-known sizes:
+    // First compute q_re from slope_is_random & has_random_logv & outcome_types located at the end of masks!
+    let tail_len = n_slope_entries + d + kx + d;
+    if masks.len() < tail_len {
+        return Err(Error::Other("masks vector too short".into()));
+    }
+    let head_len = masks.len() - tail_len;
+    let slope_is_random = &masks[head_len..(head_len + n_slope_entries)];
+    let has_random_logv = &masks[(head_len + n_slope_entries)..(head_len + n_slope_entries + d)];
+    let latent_center_x =
+        &masks[(head_len + n_slope_entries + d)..(head_len + n_slope_entries + d + kx)];
+    let outcome_types = &masks[(head_len + n_slope_entries + d + kx)..];
+
+    let n_rs = slope_is_random.iter().filter(|&&v| v != 0).count();
+    let n_lv = (0..d)
+        .filter(|&j| has_random_logv[j] != 0 && outcome_types[j] < 2)
+        .count();
+    let q_re = d + n_rs + n_lv;
+    let expected_head = q_re * kz + kw * kz + kw * q_re;
+    if head_len != expected_head {
+        return Err(Error::Other("between mask dimensions mismatch".into()));
+    }
+    let z_on_re_mask = &masks[0..(q_re * kz)];
+    let z_on_w_mask = &masks[(q_re * kz)..(q_re * kz + kw * kz)];
+    let re_on_w_mask = &masks[(q_re * kz + kw * kz)..head_len];
+
+    let sizes_u: Vec<usize> = cluster_sizes.into_iter().map(|s| s as usize).collect();
+    let out = twolevel::mcmc_twolevel(
+        &y,
+        &x,
+        &sizes_u,
+        &w,
+        &z,
+        z_on_re_mask,
+        z_on_w_mask,
+        re_on_w_mask,
+        d,
+        kx,
+        kw,
+        kz,
+        &lags_u,
+        slope_is_random,
+        has_random_logv,
+        dims[4] != 0,
+        latent_center_x,
+        dims[5] != 0,
+        outcome_types,
+        dims[6],
+        hyper[0],
+        hyper[1],
+        hyper[2],
+        dims[7] as usize,
+        dims[8] as usize,
+        dims[9] as usize,
+        dims[10] as u64,
+    );
+    Ok(list!(
+        draws = out.draws,
+        param_count = out.param_count as i32,
+        re_draws = out.re_draws,
+        q_re = out.q_re as i32,
+        fitted_mean = out.fitted_mean,
+        dic = out.dic,
+        pd = out.pd
+    ))
+}
+
+/// Native Rust MCMC kernel for Mplus Version 9 Three-Level DSEM (DSEM3).
+/// dims = [g3_cnt, d, kx, kw2, kw3, residual_dynamics, prior_mode, iter, warmup, thin, seed]
+/// masks = [has_l2_re (q_tot), has_l3_re (q_tot), latent_center_x (kx)]
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn dsem_rust_threelevel(
+    y: Vec<f64>,
+    x: Vec<f64>,
+    l2_sizes: Vec<i32>,
+    l3_of_l2: Vec<i32>,
+    w2: Vec<f64>,
+    w3: Vec<f64>,
+    lags: Vec<i32>,
+    masks: Vec<i32>,
+    dims: Vec<i32>,
+    beta_sd: f64,
+) -> std::result::Result<List, Error> {
+    if dims.len() < 11 {
+        return Err(Error::Other("invalid threelevel dims length".into()));
+    }
+    let g3_cnt = dims[0] as usize;
+    let d = dims[1] as usize;
+    let kx = dims[2] as usize;
+    let kw2 = dims[3] as usize;
+    let kw3 = dims[4] as usize;
+    let lags_u: Vec<usize> = lags.into_iter().map(|v| v.max(1) as usize).collect();
+    let q_tot = d + d * (lags_u.len() * d + kx) + d;
+    if masks.len() != 2 * q_tot + kx {
+        return Err(Error::Other("invalid threelevel masks length".into()));
+    }
+    let sizes_u: Vec<usize> = l2_sizes.into_iter().map(|v| v as usize).collect();
+    let l3_u: Vec<usize> = l3_of_l2.into_iter().map(|v| v as usize).collect();
+    let out = threelevel::mcmc_threelevel(
+        &y,
+        &x,
+        &sizes_u,
+        &l3_u,
+        g3_cnt,
+        &w2,
+        &w3,
+        d,
+        kx,
+        kw2,
+        kw3,
+        &lags_u,
+        &masks[0..q_tot],
+        &masks[q_tot..(2 * q_tot)],
+        &masks[(2 * q_tot)..],
+        dims[5] != 0,
+        dims[6],
+        beta_sd,
+        dims[7] as usize,
+        dims[8] as usize,
+        dims[9] as usize,
+        dims[10] as u64,
+    );
+    Ok(list!(
+        draws = out.draws,
+        param_count = out.param_count as i32,
+        l2_draws = out.l2_draws,
+        l3_draws = out.l3_draws,
+        fitted_mean = out.fitted_mean,
+        dic = out.dic,
+        pd = out.pd
+    ))
+}
+
+/// Native Rust MCMC kernel for Cross-Classified DSEM (Mplus 9.38-9.40).
+/// dims = [n_id, n_time, d, kx, kw, has_random_slopes, has_random_logv, prior_mode, iter, warmup, thin, seed]
+#[extendr]
+fn dsem_rust_crossclassified(
+    y_grid: Vec<f64>,
+    x_grid: Vec<f64>,
+    w_id: Vec<f64>,
+    lags: Vec<i32>,
+    dims: Vec<i32>,
+    beta_sd: f64,
+) -> std::result::Result<List, Error> {
+    if dims.len() < 12 {
+        return Err(Error::Other("invalid crossclassified dims length".into()));
+    }
+    let lags_u: Vec<usize> = lags.into_iter().map(|v| v.max(1) as usize).collect();
+    let out = crossclassified::mcmc_crossclassified(
+        &y_grid,
+        &x_grid,
+        &w_id,
+        dims[0] as usize,
+        dims[1] as usize,
+        dims[2] as usize,
+        dims[3] as usize,
+        dims[4] as usize,
+        &lags_u,
+        dims[5] != 0,
+        dims[6] != 0,
+        dims[7],
+        beta_sd,
+        dims[8] as usize,
+        dims[9] as usize,
+        dims[10] as usize,
+        dims[11] as u64,
+    );
+    Ok(list!(
+        draws = out.draws,
+        param_count = out.param_count as i32,
+        id_draws = out.id_draws,
+        time_draws = out.time_draws,
+        fitted_mean = out.fitted_mean,
+        dic = out.dic,
+        pd = out.pd
+    ))
+}
+
+/// Native Rust MCMC kernel for Single-Level & Two-Level Dynamic CFA, Dynamic SEM, WNFS, and Dynamic IRT.
+/// dims = [n_items, m, m_b, use_wnfs, equal_wb_loadings, psi_fixed_one, psi_correlated, fix_logv_mean_zero, prior_mode, store_latent, iter, warmup, thin, seed]
+/// modes = concatenated [lambda0_mode (J*m), lambda1_mode (J*m), lambdab_mode (J*m_b), phi_mode (m*m), has_random_logv (m), item_types (J)]
+#[extendr]
+fn dsem_rust_dynamic_sem(
+    y: Vec<f64>,
+    cluster_sizes: Vec<i32>,
+    lambda0_init: Vec<f64>,
+    theta_fixed: Vec<f64>,
+    modes: Vec<i32>,
+    dims: Vec<i32>,
+    ar_bound: f64,
+) -> std::result::Result<List, Error> {
+    if dims.len() < 14 {
+        return Err(Error::Other("invalid dynamic_sem dims length".into()));
+    }
+    let j = dims[0] as usize;
+    let m = dims[1] as usize;
+    let mb = dims[2] as usize;
+    let need = j * m + j * m + j * mb + m * m + m + j;
+    if modes.len() != need {
+        return Err(Error::Other("invalid dynamic_sem modes length".into()));
+    }
+    let c1 = j * m;
+    let c2 = c1 + j * m;
+    let c3 = c2 + j * mb;
+    let c4 = c3 + m * m;
+    let c5 = c4 + m;
+
+    let sizes_u: Vec<usize> = cluster_sizes.into_iter().map(|v| v as usize).collect();
+    let out = dynamic_sem::mcmc_dynamic_sem(
+        &y,
+        &sizes_u,
+        j,
+        m,
+        mb,
+        &modes[0..c1],
+        &lambda0_init,
+        dims[3] != 0,
+        &modes[c1..c2],
+        &modes[c2..c3],
+        dims[4] != 0,
+        &modes[c3..c4],
+        dims[5] != 0,
+        dims[6] != 0,
+        &modes[c4..c5],
+        dims[7] != 0,
+        &modes[c5..],
+        &theta_fixed,
+        dims[8],
+        ar_bound,
+        dims[9] != 0,
+        dims[10] as usize,
+        dims[11] as usize,
+        dims[12] as usize,
+        dims[13] as u64,
+    );
+    Ok(list!(
+        draws = out.draws,
+        param_count = out.param_count as i32,
+        latent_draws = out.latent_draws,
+        re_draws = out.re_draws,
+        fitted_mean = out.fitted_mean,
+        dic = out.dic,
+        pd = out.pd
+    ))
+}
+
 fn sufficient_kernel(
     x: &[f64],
     y: &[f64],
@@ -110,6 +453,22 @@ fn sufficient_kernel(
 }
 
 type GroupedStatistics = (Vec<f64>, Vec<f64>, Vec<f64>);
+type FactorStatistics = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<usize>);
+
+#[derive(Clone, Copy, Default)]
+struct CompensatedSum {
+    sum: f64,
+    correction: f64,
+}
+
+impl CompensatedSum {
+    fn add(&mut self, value: f64) {
+        let adjusted = value - self.correction;
+        let updated = self.sum + adjusted;
+        self.correction = (updated - self.sum) - adjusted;
+        self.sum = updated;
+    }
+}
 
 fn grouped_sufficient_kernel(
     x: &[f64],
@@ -146,10 +505,75 @@ fn grouped_sufficient_kernel(
     Ok((xtx, xty, yty))
 }
 
+fn factor_sufficient_kernel(
+    y: &[f64],
+    eta: &[f64],
+    n: usize,
+    items: usize,
+    factors: usize,
+) -> std::result::Result<FactorStatistics, &'static str> {
+    if y.len() != n * items || eta.len() != n * factors {
+        return Err("y or eta dimensions do not match n, items, and factors");
+    }
+    if eta.iter().any(|value| !value.is_finite()) {
+        return Err("eta must contain only finite latent scores");
+    }
+    if y.iter().any(|value| value.is_infinite()) {
+        return Err("y may contain missing values but not infinite values");
+    }
+
+    let design_cols = factors + 1;
+    let mut ztz = vec![CompensatedSum::default(); items * design_cols * design_cols];
+    let mut zty = vec![CompensatedSum::default(); items * design_cols];
+    let mut yty = vec![CompensatedSum::default(); items];
+    let mut n_obs = vec![0usize; items];
+
+    for item in 0..items {
+        for row in 0..n {
+            let response = y[row + n * item];
+            if response.is_nan() {
+                continue;
+            }
+            n_obs[item] += 1;
+            yty[item].add(response * response);
+            for col in 0..design_cols {
+                let z_col = if col == 0 {
+                    1.0
+                } else {
+                    eta[row + n * (col - 1)]
+                };
+                zty[item * design_cols + col].add(z_col * response);
+                for other in 0..design_cols {
+                    let z_other = if other == 0 {
+                        1.0
+                    } else {
+                        eta[row + n * (other - 1)]
+                    };
+                    let offset = item * design_cols * design_cols + col + design_cols * other;
+                    ztz[offset].add(z_col * z_other);
+                }
+            }
+        }
+    }
+
+    Ok((
+        ztz.into_iter().map(|value| value.sum).collect(),
+        zty.into_iter().map(|value| value.sum).collect(),
+        yty.into_iter().map(|value| value.sum).collect(),
+        n_obs,
+    ))
+}
+
 extendr_module! {
     mod dsemr;
     fn dsem_ar_sufficient;
     fn dsem_grouped_sufficient;
+    fn dsem_factor_sufficient;
+    fn dsem_rust_var_n1;
+    fn dsem_rust_twolevel;
+    fn dsem_rust_threelevel;
+    fn dsem_rust_crossclassified;
+    fn dsem_rust_dynamic_sem;
 }
 
 #[cfg(test)]
@@ -158,7 +582,6 @@ mod tests {
 
     #[test]
     fn computes_cross_products() {
-        // Matrix columns are [1, 1, 1] and [1, 2, 3].
         let (xtx, xty, yty) =
             sufficient_kernel(&[1.0, 1.0, 1.0, 1.0, 2.0, 3.0], &[2.0, 4.0, 6.0], 3, 2).unwrap();
         assert_eq!(xtx, vec![3.0, 6.0, 6.0, 14.0]);
@@ -167,17 +590,92 @@ mod tests {
     }
 
     #[test]
-    fn computes_grouped_cross_products() {
-        let (xtx, xty, yty) = grouped_sufficient_kernel(
-            &[1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0, 4.0],
-            &[2.0, 4.0, 6.0, 8.0],
-            &[2, 2],
+    fn truncnorm_and_linalg_are_stable() {
+        let mut r = rng::Rng::from_seed(42);
+        for _ in 0..200 {
+            let v = r.rtruncnorm(0.0, 1.0, 4.5, f64::INFINITY);
+            assert!(v >= 4.5 && v.is_finite());
+            let v2 = r.rtruncnorm(0.0, 1.0, f64::NEG_INFINITY, -4.5);
+            assert!(v2 <= -4.5 && v2.is_finite());
+        }
+        let a = vec![4.0, 1.0, 1.0, 3.0];
+        let inv = linalg::spd_invert(&a, 2);
+        let prod = linalg::mat_mul(&a, &inv, 2, 2, 2);
+        assert!((prod[0] - 1.0).abs() < 1e-12);
+        assert!((prod[3] - 1.0).abs() < 1e-12);
+        assert!(prod[1].abs() < 1e-12);
+    }
+
+    #[test]
+    fn threelevel_and_twolevel_samplers_recover_ar() {
+        let mut r = rng::Rng::from_seed(123);
+        let mut y = Vec::new();
+        for g in 0..8 {
+            let mu_g = (g as f64 - 3.5) * 0.2;
+            let mut prev = 0.0;
+            for _ in 0..25 {
+                let cur = 0.5 * prev + 0.5 * r.rnorm();
+                y.push(mu_g + cur);
+                prev = cur;
+            }
+        }
+        let out2 = twolevel::mcmc_twolevel(
+            &y,
+            &[],
+            &[25; 8],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            0,
+            0,
+            &[1],
+            &[1],
+            &[1],
+            true,
+            &[],
+            false,
+            &[0],
+            0,
+            10.0,
+            2.0,
+            0.05,
+            200,
+            100,
+            1,
+            99,
+        );
+        assert_eq!(out2.draws.len(), 100 * out2.param_count);
+        assert!(out2.dic.is_finite());
+
+        let out3 = threelevel::mcmc_threelevel(
+            &y,
+            &[],
+            &[25; 8],
+            &[0, 0, 1, 1, 2, 2, 3, 3],
             4,
-            2,
-        )
-        .unwrap();
-        assert_eq!(xtx, vec![2.0, 3.0, 3.0, 5.0, 2.0, 7.0, 7.0, 25.0]);
-        assert_eq!(xty, vec![6.0, 10.0, 14.0, 50.0]);
-        assert_eq!(yty, vec![20.0, 100.0]);
+            &[],
+            &[],
+            1,
+            0,
+            0,
+            0,
+            &[1],
+            &[1, 0, 0],
+            &[1, 1, 1],
+            &[],
+            false,
+            0,
+            10.0,
+            120,
+            60,
+            1,
+            77,
+        );
+        assert_eq!(out3.draws.len(), 60 * out3.param_count);
+        assert!(out3.dic.is_finite());
     }
 }

@@ -1,0 +1,59 @@
+id: mplus-6.26b
+title: N=1 continuous AR(1) confirmatory factor analysis (WNFS)
+source_index: https://www.statmodel.com/usersguide/chapter6.shtml
+source_output: https://www.statmodel.com/usersguide/chap6/ex6.26b.html
+accessed: 2026-09-04
+mplus_version: "8.8"
+files:
+  input_sha256: 9a4911e7daa443abc888678a268a7d65d8b6a7243a6673e5399536eb2127f873
+  data_sha256: db8c2848f9e51c724267ae5e1f161034561ef5745f6830707f8b3748812ce9d2
+  output_sha256: 15b30a5ccee0e53d9b8da0ced49049f3d9cc24d3161fc44fb4fa7ead43faad0d
+data:
+  observations: 200
+  indicators: [y1, y2, y3, y4]
+  missing_values: 0
+estimation:
+  estimator: BAYES
+  point_estimate: posterior_median
+  chains: 2
+  requested_biterations: 20000
+  algorithm: GIBBS(PX1)
+  free_parameters: 16
+fit_targets:
+  dic: 2444.508
+  effective_parameters_pd: 169.802
+parameter_targets:
+  - {parameter: loading_y1, estimate: 1.000, posterior_sd: 0.000, ci95: [1.000, 1.000], fixed: true}
+  - {parameter: loading_y2, estimate: 1.134, posterior_sd: 0.148, ci95: [0.891, 1.476]}
+  - {parameter: loading_y3, estimate: 1.210, posterior_sd: 0.172, ci95: [0.936, 1.615]}
+  - {parameter: loading_y4, estimate: 1.125, posterior_sd: 0.156, ci95: [0.866, 1.479]}
+  - {parameter: lagged_factor_effect_y1, estimate: 0.299, posterior_sd: 0.137, ci95: [0.056, 0.589]}
+  - {parameter: lagged_factor_effect_y2, estimate: 0.299, posterior_sd: 0.130, ci95: [0.062, 0.575]}
+  - {parameter: lagged_factor_effect_y3, estimate: 0.401, posterior_sd: 0.139, ci95: [0.149, 0.696]}
+  - {parameter: lagged_factor_effect_y4, estimate: 0.359, posterior_sd: 0.132, ci95: [0.118, 0.641]}
+  - {parameter: intercept_y1, estimate: 0.094, posterior_sd: 0.112, ci95: [-0.127, 0.314]}
+  - {parameter: intercept_y2, estimate: 0.177, posterior_sd: 0.117, ci95: [-0.055, 0.403]}
+  - {parameter: intercept_y3, estimate: 0.158, posterior_sd: 0.129, ci95: [-0.100, 0.404]}
+  - {parameter: intercept_y4, estimate: 0.127, posterior_sd: 0.123, ci95: [-0.118, 0.368]}
+  - {parameter: factor_variance, estimate: 0.878, posterior_sd: 0.197, ci95: [0.527, 1.300]}
+  - {parameter: residual_variance_y1, estimate: 1.020, posterior_sd: 0.137, ci95: [0.786, 1.320]}
+  - {parameter: residual_variance_y2, estimate: 0.883, posterior_sd: 0.133, ci95: [0.646, 1.171]}
+  - {parameter: residual_variance_y3, estimate: 1.052, posterior_sd: 0.156, ci95: [0.774, 1.388]}
+  - {parameter: residual_variance_y4, estimate: 1.136, posterior_sd: 0.155, ci95: [0.870, 1.473]}
+required_semantics:
+  - contemporaneous factor measurement with a fixed marker loading
+  - lagged factor predicts each observed indicator directly
+  - free factor variance and independent indicator residual variances
+  - zero factor mean with free indicator intercepts
+dsemr_status: planned
+semantic_gaps:
+  - WNFS observation equation with lagged-factor direct effects
+  - exact Mplus range and lag-modifier parsing
+  - exact default-prior and initial-state mapping
+  - DIC and pD calculation
+  - public output reports no parameter-level MCSE
+acceptance:
+  primary_rule: Posterior estimates must agree within two combined MCSEs after semantic parity is complete.
+  blocker: The public Mplus output does not report parameter-level MCSE.
+  validation_state: not_run
+

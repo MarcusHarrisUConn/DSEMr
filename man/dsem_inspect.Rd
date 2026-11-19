@@ -2,22 +2,29 @@
 % Please edit documentation in R/methods.R
 \name{dsem_inspect}
 \alias{dsem_inspect}
-\title{Inspect a DSEMr object}
+\title{Inspect components of a DSEMr model or fitted object}
 \usage{
 dsem_inspect(
   object,
   what = c("model", "terms", "estimates", "draws", "diagnostics", "compute", "versions",
-    "fit", "random_effects", "random_effects_summary", "random_effect_draws")
+    "fit", "random_effects", "random_effects_summary", "random_effect_draws",
+    "latent_states", "latent_draws", "prior", "sampler", "identification",
+    "standardized", "vif")
 )
 }
 \arguments{
-\item{object}{A \code{DSEMmodel} or \code{DSEMfit}.}
+\item{object}{A \code{DSEMmodel} or \code{DSEMfit} object.}
 
-\item{what}{Component to extract.}
+\item{what}{Component to retrieve.}
 }
 \value{
-The requested component.
+The requested component from \code{object}.
 }
 \description{
-Inspect a DSEMr object
+Inspect components of a DSEMr model or fitted object
+}
+\examples{
+dat <- simulate_dsem(n = 50, seed = 3)
+fit <- dsem("y ~ lag(y, 1)", dat, chains = 2, iter = 160, warmup = 80, seed = 3)
+dsem_inspect(fit, "diagnostics")
 }

@@ -19,15 +19,20 @@ dsem_compute(
 
 \item{backend}{\code{"sequential"} or process-level \code{"psock"}.}
 
-\item{checkpoint}{Optional directory for future checkpoint files.}
+\item{checkpoint}{Optional directory for checkpoint files.}
 
 \item{blas_threads}{Intended BLAS thread count recorded in the manifest.}
 }
 \value{
-A \code{DSEMcompute} object.
+A \code{DSEMcompute} object describing worker, thread, and scheduler
+settings.
 }
 \description{
 Creates a scheduler-aware compute specification. The default worker count
-respects process limits, containers, CRAN checks, and common HPC schedulers
-through \code{\link[parallelly:availableCores]{parallelly::availableCores()}}.
+respects process limits, containers, CRAN check limits, and common HPC
+schedulers through \code{\link[parallelly:availableCores]{parallelly::availableCores()}}.
+}
+\examples{
+dsem_compute()
+dsem_compute(workers = 1, backend = "sequential")
 }

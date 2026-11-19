@@ -4,7 +4,8 @@ test_that("compute configuration is bounded and explicit", {
   expect_equal(sequential$backend, "sequential")
   expect_error(dsem_compute(workers = 2, backend = "sequential"),
                "requires `workers = 1`")
-  expect_error(dsem_compute(threads = 0), "positive integer")
+  expect_error(dsem_compute(threads = 0), "integer")
+  expect_error(dsem_compute(workers = 1.5), "integer")
 })
 
 test_that("stable task seeds depend on task identity", {
@@ -14,4 +15,3 @@ test_that("stable task seeds depend on task identity", {
   expect_identical(a, b)
   expect_false(identical(a, c))
 })
-

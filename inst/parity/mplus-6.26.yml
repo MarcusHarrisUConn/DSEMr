@@ -1,0 +1,137 @@
+id: mplus-6.26
+title: N=1 continuous AR(1) confirmatory factor analysis (DAFS)
+role: first-latent-parity-target
+source_index: https://www.statmodel.com/usersguide/chapter6.shtml
+source_output: https://www.statmodel.com/usersguide/chap6/ex6.26.html
+source_monte_carlo: https://www.statmodel.com/usersguide/chap6/mcex6.26.html
+accessed: 2026-09-04
+mplus_version: "8.8"
+files:
+  input_sha256: 2d6a1ccb9b190ecb6c86930fa69e99f2b4190b658ad75ebf034660faa7a81cf4
+  data_sha256: db8c2848f9e51c724267ae5e1f161034561ef5745f6830707f8b3748812ce9d2
+  output_sha256: ad63acf3c17c20cb6a50ab1c9345621cf35cbc02854fb79033a241375c4a0925
+  monte_carlo_input_sha256: 6f7f565bca6df9daa67bcb1508369e80c2021a2c1961a043e35b265ff808e053
+  monte_carlo_output_sha256: 7bece8dfef290087cbfeef6641308fe7c81a9ea51dfa299e2d7da7dcc83037b9
+data:
+  observations: 200
+  indicators: [y1, y2, y3, y4]
+  missing_values: 0
+  ordering: consecutive rows define a unit-spaced time series
+estimation:
+  estimator: BAYES
+  point_estimate: posterior_median
+  chains: 2
+  requested_biterations: 2000
+  algorithm: GIBBS(PX1)
+  convergence_criterion_psr: 0.05
+  terminal_reported_psr: 1.006
+  thinning: 1
+  free_parameters: 13
+fit_targets:
+  dic: 2435.851
+  effective_parameters_pd: 167.713
+parameter_targets:
+  - parameter: loading_y1
+    estimate: 1.000
+    posterior_sd: 0.000
+    ci95: [1.000, 1.000]
+    fixed: true
+  - parameter: loading_y2
+    estimate: 1.097
+    posterior_sd: 0.125
+    ci95: [0.890, 1.391]
+  - parameter: loading_y3
+    estimate: 1.200
+    posterior_sd: 0.143
+    ci95: [0.950, 1.522]
+  - parameter: loading_y4
+    estimate: 1.118
+    posterior_sd: 0.139
+    ci95: [0.882, 1.443]
+  - parameter: ar1_f
+    estimate: 0.310
+    posterior_sd: 0.084
+    ci95: [0.152, 0.482]
+  - parameter: intercept_y1
+    estimate: 0.083
+    posterior_sd: 0.118
+    ci95: [-0.164, 0.307]
+  - parameter: intercept_y2
+    estimate: 0.166
+    posterior_sd: 0.125
+    ci95: [-0.087, 0.401]
+  - parameter: intercept_y3
+    estimate: 0.141
+    posterior_sd: 0.141
+    ci95: [-0.148, 0.411]
+  - parameter: intercept_y4
+    estimate: 0.114
+    posterior_sd: 0.133
+    ci95: [-0.162, 0.374]
+  - parameter: residual_variance_y1
+    estimate: 1.004
+    posterior_sd: 0.127
+    ci95: [0.777, 1.274]
+  - parameter: residual_variance_y2
+    estimate: 0.890
+    posterior_sd: 0.122
+    ci95: [0.669, 1.137]
+  - parameter: residual_variance_y3
+    estimate: 1.038
+    posterior_sd: 0.149
+    ci95: [0.777, 1.355]
+  - parameter: residual_variance_y4
+    estimate: 1.120
+    posterior_sd: 0.152
+    ci95: [0.842, 1.443]
+  - parameter: factor_innovation_variance
+    estimate: 0.911
+    posterior_sd: 0.182
+    ci95: [0.575, 1.283]
+documented_default_priors:
+  indicator_intercepts: "N(0, infinity)"
+  free_factor_loadings: "N(0, infinity)"
+  latent_ar_coefficient: "N(0, infinity)"
+  indicator_residual_variances: "IG(-1, 0)"
+  factor_innovation_variance: "IG(-1, 0)"
+simulation_truth:
+  indicator_intercepts: [0, 0, 0, 0]
+  factor_loadings: [1, 1, 1, 1]
+  latent_ar_coefficient: 0.3
+  indicator_residual_variances: [1, 1, 1, 1]
+  factor_innovation_variance: 1
+required_semantics:
+  - one time-invariant factor measured by four continuous indicators
+  - first loading fixed to one and the other loadings estimated
+  - factor mean and state intercept fixed to zero while indicator intercepts are free
+  - time-invariant mutually independent indicator residuals
+  - first-order autoregression on the latent factor
+  - free factor innovation variance
+  - missing indicators integrated through the latent-state sampler
+  - Mplus-compatible treatment of the initial latent state
+dsemr_status: implemented-experimental
+implemented_components:
+  - single-factor continuous N=1 FFBS and Gibbs reference sampler
+  - marker-loading identification
+  - zero factor-state intercept matching the Mplus location constraint
+  - indicator intercepts, loadings, residual variances, and factor innovation variance
+  - posterior latent-state storage and item-level missing observations
+  - Rust-accelerated item sufficient statistics with an exact R reference path
+  - deterministic independent chains
+semantic_gaps:
+  - exact Mplus improper default-prior mapping
+  - documented match for the Mplus initial-state distribution
+  - GIBBS(PX1) parameter-expansion behavior
+  - DIC and pD calculation
+  - fully native Rust latent-state sampler beyond sufficient-statistics acceleration
+  - public output reports no parameter-level MCSE
+acceptance:
+  primary_rule: Posterior estimates must agree within two combined MCSEs after semantic parity is complete.
+  blocker: The public Mplus output does not report parameter-level MCSE, so the primary rule is not yet evaluable.
+  provisional_rule: DSEMr point estimates must fall inside the published Mplus intervals and its intervals must overlap them, with all differences and diagnostics reported.
+  validation_state: not_run
+  dsemr_version: null
+  dsemr_commit: null
+  seed: null
+  compute_manifest: null
+  reviewer: null

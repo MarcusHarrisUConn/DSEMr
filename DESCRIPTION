@@ -1,22 +1,35 @@
 Package: DSEMr
-Title: Dynamic Structural Equation Models
-Version: 0.0.1.9000
-Authors@R: 
+Title: Bayesian Dynamic Structural Equation Modeling
+Version: 0.1.0
+Authors@R: c(
     person("Marcus", "Harris", role = c("aut", "cre"),
-           email = "160916588+MarcusHarrisUConn@users.noreply.github.com")
-Description: Provides a clean-room framework for specifying, simulating, and
-    estimating dynamic structural equation models. Models can be expressed
-    with an extension of 'lavaan' syntax or a documented subset of Mplus-like
-    syntax and are compiled to a common intermediate representation. The
-    initial experimental estimator implements Bayesian Gaussian autoregressive
-    models and a Rust numerical kernel, with reproducible process-level
-    parallelism for chains and Monte Carlo studies. Broader model families are
-    represented by the compiler but are rejected by the estimator until their
-    validation gates are complete.
+           email = "marcus.harris.uconn@gmail.com"),
+    person("The extendr contributors", role = "ctb",
+           comment = "Authors of vendored Rust crates; see inst/AUTHORS")
+  )
+Description: Specifies, simulates, and estimates Bayesian dynamic structural
+    equation models for intensive longitudinal and time-series data using a
+    compiled 'Rust' numerical backend and an R reference engine. Models can be
+    expressed with an extension of 'lavaan' syntax or a clean-room 'Mplus'
+    Version 9 compatibility language and compile to a unified intermediate
+    representation. Supports single-level vector autoregressive, residual
+    dynamic (Asparouhov and Muthen, 2020, <doi:10.1080/10705511.2019.1626733>),
+    dynamic factor, white-noise factor score, and binary or ordinal probit
+    models; two-level location-scale dynamic models with latent centering,
+    random slopes, random log innovation variances, and between-level
+    structural regressions (Asparouhov, Hamaker, and Muthen, 2018,
+    <doi:10.1080/10705511.2017.1406803>; McNeish and Hamaker, 2020,
+    <doi:10.1037/met0000250>); three-level dynamic structural equation models
+    with three-level latent variable decomposition; cross-classified subject-by-time
+    models; time-interval grid alignment; penalized shrinkage priors; within-cluster
+    standardized estimates (Schuurman, Ferrer, de Boer-Sonnenschein, and
+    Hamaker, 2016, <doi:10.1037/met0000062>); covariate variance inflation
+    factors; and deterministic parallel Monte Carlo simulation studies.
 License: GPL (>= 3)
 URL: https://github.com/MarcusHarrisUConn/DSEMr
 BugReports: https://github.com/MarcusHarrisUConn/DSEMr/issues
 Encoding: UTF-8
+Language: en-US
 Roxygen: list(markdown = TRUE)
 Depends: R (>= 4.2.0)
 Imports:
@@ -24,15 +37,17 @@ Imports:
     lavaan (>= 0.6-20),
     parallel,
     parallelly,
+    posterior (>= 1.4.0),
     stats,
     utils
 Suggests:
     knitr,
     rmarkdown,
+    spelling,
     testthat (>= 3.0.0),
     withr
 VignetteBuilder: knitr
-SystemRequirements: Cargo (Rust's package manager), rustc >= 1.65.0, xz
+SystemRequirements: Cargo (Rust's package manager), rustc (>= 1.71.0)
 Config/rextendr/version: 0.5.0
 Config/roxygen2/version: 8.1.0
 Config/testthat/edition: 3

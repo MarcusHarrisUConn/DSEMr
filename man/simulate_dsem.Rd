@@ -2,7 +2,7 @@
 % Please edit documentation in R/simulate.R
 \name{simulate_dsem}
 \alias{simulate_dsem}
-\title{Simulate a Gaussian autoregressive process}
+\title{Simulate dynamic structural equation model data}
 \usage{
 simulate_dsem(
   model = NULL,
@@ -17,37 +17,73 @@ simulate_dsem(
   clusters = NULL,
   random_sd = c(0.3, 0.1),
   random_cor = 0,
-  id = "id"
+  id = "id",
+  loadings = NULL,
+  indicator_intercepts = 0,
+  residual_sd = 0.5,
+  family = c("gaussian", "binary", "ordinal"),
+  cross_classified = FALSE,
+  time_sd = 0.25
 )
 }
 \arguments{
-\item{model}{Optional compiled model used to identify the outcome name.}
+\item{model}{Optional compiled \code{DSEMmodel} used to infer variable names,
+hierarchy, and measurement structure.}
 
-\item{n}{Number of retained time points.}
+\item{n}{Number of retained time points per series.}
 
-\item{intercept, ar, sigma}{Data-generating parameters.}
+\item{intercept, ar, sigma}{Baseline location, autoregressive slope, and
+innovation standard deviation.}
 
-\item{burnin}{Number of discarded initialization observations.}
+\item{burnin}{Number of initialization observations discarded before \code{n}.}
 
-\item{seed}{Reproducibility seed.}
+\item{seed}{Integer reproducibility seed (caller RNG state is preserved).}
 
-\item{outcome}{Name of the generated outcome.}
+\item{outcome}{Name of the generated outcome column.}
 
-\item{time}{Name of the generated time index.}
+\item{time}{Name of the generated time index column.}
 
-\item{clusters}{Optional number of independent individuals. When supplied,
-a two-level process with random intercepts and AR effects is generated.}
+\item{clusters}{Optional integer specifying cluster counts: length 1 for
+two-level (\code{N} individuals), or length 2 \code{c(n_l3, n_l2_per_l3)} for
+three-level DSEM3 (\code{n_l3} Level-3 clusters, each containing
+\code{n_l2_per_l3} Level-2 units).}
 
-\item{random_sd}{Length-two vector containing the random-intercept and
-random-AR standard deviations.}
+\item{random_sd}{Numeric vector of random-effect SDs (\code{c(sd_intercept, sd_ar)}
+or \code{c(sd_intercept, sd_ar, sd_logv)} for location-scale DSEM).}
 
-\item{random_cor}{Correlation between the random intercept and AR effect.}
+\item{random_cor}{Correlation between random intercept and random AR slope.}
 
-\item{id}{Name of the generated cluster identifier.}
+\item{id}{Character vector of cluster column name(s) (\code{"id"} for two-level or
+\code{c("l2_id", "l3_id")} for three-level).}
+
+\item{loadings, indicator_intercepts, residual_sd}{Measurement parameters when
+generating dynamic factor indicators.}
+
+\item{family}{Outcome family: \code{"gaussian"}, \code{"binary"}, or \code{"ordinal"}.}
+
+\item{cross_classified}{Logical; if \code{TRUE}, adds occasion-specific random
+shocks with SD \code{time_sd}.}
+
+\item{time_sd}{Standard deviation of occasion shocks when \code{cross_classified = TRUE}.}
 }
 \value{
-A data frame in long format.
+A data frame in long format with generating parameter truth attached
+in \code{attr(out, "dsem_truth")}.
 }
 \description{
-Simulate a Gaussian autoregressive process
+Generates synthetic intensive longitudinal datasets for single-level (\code{N=1}),
+two-level (\code{clusters} of length 1), Mplus Version 9 three-level (\code{clusters}
+of length 2: \code{c(n_level3, n_level2_per_level3)}), cross-classified
+(\code{cross_classified = TRUE}), binary/ordinal probit (\code{family = "binary"} or
+\code{"ordinal"}), and latent dynamic factor models.
+}
+\examples{
+# N=1 Gaussian AR(1)
+d1 <- simulate_dsem(n = 50, ar = 0.5, seed = 1)
+head(d1)
+
+# Three-level DSEM3 (5 Level-3 clusters x 4 Level-2 bursts x 15 occasions)
+d3 <- simulate_dsem(n = 15, clusters = c(5, 4), id = c("day", "person"),
+                    ar = 0.4, seed = 2)
+head(d3)
 }

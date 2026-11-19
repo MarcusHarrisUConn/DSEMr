@@ -1,17 +1,34 @@
 ---
-title: "Migrating supported Mplus-like syntax"
+title: "Migrating Mplus Version 8 and Version 9 DSEM syntax"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Migrating supported Mplus-like syntax}
+  %\VignetteIndexEntry{Migrating Mplus Version 8 and Version 9 DSEM syntax}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
 
-DSEMr implements a clean-room, deliberately limited compatibility language.
-Unsupported statements fail instead of being silently ignored.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+`DSEMr` provides a clean-room compatibility parser for Mplus Version 8 and
+Version 9 DSEM specifications, translating `VARIABLE`, `DEFINE`, `ANALYSIS`,
+and `MODEL` sections into the exact same canonical intermediate representation
+as `lavaan`-extended DSEM syntax.
+
+Supported Mplus constructs include:
+
+- `TYPE = TWOLEVEL RANDOM`, `TYPE = THREELEVEL RANDOM` (Version 9 DSEM3), and
+  `TYPE = CROSSCLASSIFIED RANDOM`
+- `TINTERVAL = time(delta)`, `LAGGED = y(1)`, `CATEGORICAL = u1-u4`
+- `DEFINE: CENTER x (GROUPMEAN | GRANDMEAN);`
+- Named random slopes (`s | y ON y&1;`), random log residual variances
+  (`logv | y;`), residual dynamics (`y^ ON y^1;`), dynamic CFA/IRT (`BY` with
+  `(&1)`, `*`, `@value`, and cross-level equality `(1-4)`), and `PRIOR = PSEM`
 
 ```{r}
 library(DSEMr)
+
 lavaan_model <- dsem_model("y ~ lag(y, 1)", time = "time")
 mplus_model <- mplus_to_dsem("
   ANALYSIS: TYPE = BAYES;
@@ -20,8 +37,19 @@ mplus_model <- mplus_to_dsem("
     y ON y&1;
 ", time = "time")
 identical(lavaan_model$terms, mplus_model$terms)
+
+# Mplus Version 9 three-level DSEM compilation
+m3 <- mplus_to_dsem("
+  VARIABLE: CLUSTER = clinic patient;
+  ANALYSIS: TYPE = THREELEVEL RANDOM; ESTIMATOR = BAYES;
+  MODEL:
+    %WITHIN%
+    s | y ON y&1;
+    logv | y;
+    %BETWEEN patient%
+    y;
+    %BETWEEN clinic%
+    y s logv WITH y s logv;
+", time = "occasion")
+print(m3)
 ```
-
-Compatibility claims are tracked per example in `docs/PARITY.md`; parsing an
-operator is not evidence that its estimator is available.
-

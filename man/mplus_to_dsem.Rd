@@ -2,24 +2,38 @@
 % Please edit documentation in R/model.R
 \name{mplus_to_dsem}
 \alias{mplus_to_dsem}
-\title{Translate supported Mplus-like syntax}
+\title{Translate supported Mplus syntax to a DSEMr model}
 \usage{
 mplus_to_dsem(
   model,
   id = NULL,
   time = NULL,
-  family = c("gaussian", "binary", "ordinal")
+  family = c("gaussian", "binary", "ordinal"),
+  ...
 )
 }
 \arguments{
-\item{model}{Character Mplus-like model input.}
+\item{model}{Character Mplus model input (supporting Mplus Version 8 and
+Version 9 DSEM, RDSEM, THREELEVEL, and CROSSCLASSIFIED specifications).}
 
-\item{id, time, family}{Passed to \code{\link[=dsem_model]{dsem_model()}}.}
+\item{id, time, family, ...}{Passed to \code{\link[=dsem_model]{dsem_model()}}.}
 }
 \value{
 A compiled \code{DSEMmodel} using the same canonical representation as
-lavaan-style input.
+\code{lavaan}-style input.
 }
 \description{
-Translate supported Mplus-like syntax
+Translate supported Mplus syntax to a DSEMr model
+}
+\examples{
+m <- mplus_to_dsem("
+  ANALYSIS: TYPE = TWOLEVEL RANDOM; ESTIMATOR = BAYES;
+  MODEL:
+    \%WITHIN\%
+    s | y ON y&1;
+    logv | y;
+    \%BETWEEN\%
+    y s logv WITH y s logv;
+", id = "subject", time = "time")
+print(m)
 }

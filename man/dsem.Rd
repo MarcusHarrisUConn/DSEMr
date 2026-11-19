@@ -11,6 +11,7 @@ dsem(
   id = NULL,
   time = NULL,
   family = "gaussian",
+  ...,
   chains = 4L,
   iter = 2000L,
   warmup = floor(iter/2),
@@ -22,35 +23,65 @@ dsem(
 )
 }
 \arguments{
-\item{model}{A \code{DSEMmodel} or model string.}
+\item{model}{A \code{DSEMmodel} object or model specification string.}
 
-\item{data}{Data frame in long format.}
+\item{data}{A data frame in long format.}
 
-\item{syntax, id, time, family}{Used when \code{model} is a string.}
+\item{syntax, id, time, family, ...}{Passed to \code{\link[=dsem_model]{dsem_model()}} when \code{model} is a
+character string.}
 
-\item{chains}{Number of MCMC chains.}
+\item{chains}{Number of independent MCMC chains.}
 
-\item{iter}{Total iterations per chain.}
+\item{iter}{Total MCMC iterations per chain.}
 
-\item{warmup}{Discarded warmup iterations.}
+\item{warmup}{Number of warmup (burn-in) iterations discarded per chain.}
 
 \item{thin}{Positive thinning interval.}
 
-\item{seed}{Master seed. Task-specific chain seeds are deterministically
-derived from it.}
+\item{seed}{Non-negative integer master seed. Chain-specific seeds are
+deterministically derived from \code{seed}, the canonical model hash, and chain
+index so draws are invariant to worker count.}
 
-\item{compute}{A \code{\link[=dsem_compute]{dsem_compute()}} specification.}
+\item{compute}{A \code{\link[=dsem_compute]{dsem_compute()}} resource specification.}
 
-\item{engine}{\code{"auto"}, \code{"rust"}, or transparent \code{"R"} reference engine.}
+\item{engine}{Numerical backend: \code{"auto"} (uses compiled Rust when available),
+\code{"rust"}, or transparent \code{"R"} reference implementation.}
 
-\item{control}{Named list of prior controls.}
+\item{control}{Named list of prior and estimation controls. Accepts
+\code{prior_mode} (\code{"default"}, \code{"mplus"}, or \code{"penalized"} for Mplus Version 9
+PSEM shrinkage), \code{beta_mean}, \code{beta_sd}, \code{sigma_shape}, \code{sigma_scale},
+\code{omega_df}, \code{omega_scale}, \code{coefficient_mean}, \code{coefficient_sd},
+\code{variance_shape}, \code{variance_scale}, and \code{ar_bound}.}
 }
 \value{
-A \code{DSEMfit} object.
+A \code{DSEMfit} object with S3 methods \code{\link[=summary]{summary()}}, \code{\link[=coef]{coef()}}, \code{\link[=vcov]{vcov()}},
+\code{\link[=confint]{confint()}}, \code{\link[=logLik]{logLik()}}, \code{\link[=fitted]{fitted()}}, \code{\link[=residuals]{residuals()}}, \code{\link[=predict]{predict()}}, \code{\link[=plot]{plot()}},
+\code{\link[=dsem_standardize]{dsem_standardize()}}, \code{\link[=dsem_dic]{dsem_dic()}}, \code{\link[=dsem_vif]{dsem_vif()}}, and \code{\link[=dsem_inspect]{dsem_inspect()}}.
 }
 \description{
-The current development estimator is deliberately narrow: it supports an
-N=1 Gaussian AR(1) regression, optionally with contemporaneous covariates.
-The compiler can represent broader DSEM families, but \code{\link[=dsem]{dsem()}} stops with a
-capability error until each estimator has passed its parity gate.
+Fits Bayesian dynamic structural equation models compiled by \code{\link[=dsem_model]{dsem_model()}}
+or specified directly via \code{lavaan}-style or Mplus Version 9 syntax.
+Supported model families include single-level (\code{N=1}) autoregressive and
+vector autoregressive (\code{VAR(p)}) models, residual dynamic models (\code{RDSEM}),
+binary and ordinal probit dynamic models, single- and multi-factor dynamic
+confirmatory factor / IRT models (\code{DAFS}, \code{WNFS}, \code{ARMA}), two-level
+location-scale DSEM with latent centering and random log residual variances,
+Mplus Version 9 three-level DSEM (\code{THREELEVEL} / \code{DSEM3}), and subject-by-time
+cross-classified DSEM (\code{CROSSCLASSIFIED}).
+}
+\examples{
+dat <- simulate_dsem(n = 80, intercept = 0.2, ar = 0.5, sigma = 0.7, seed = 1)
+fit <- dsem("y ~ lag(y, 1)", dat, time = "time",
+            chains = 2, iter = 200, warmup = 100, seed = 1)
+summary(fit)
+coef(fit)
+}
+\references{
+Asparouhov, T., Hamaker, E. L., & Muthen, B. (2018). Dynamic structural
+equation models. \emph{Structural Equation Modeling}, 25(3), 359-388.
+\doi{10.1080/10705511.2017.1406803}
+
+Asparouhov, T., & Muthen, B. (2020). Comparison of models for the analysis of
+intensive longitudinal data. \emph{Structural Equation Modeling}, 27(2), 275-297.
+\doi{10.1080/10705511.2019.1626733}
 }

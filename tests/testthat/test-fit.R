@@ -90,7 +90,7 @@ test_that("two-level AR(1) estimates population and cluster dynamics", {
   fit <- dsem(model, dat, chains = 2, iter = 240, warmup = 120,
               seed = 71, engine = "R")
   expect_s3_class(fit, "DSEMfit")
-  expect_equal(fit$status, "experimental-two-level-ar1")
+  expect_equal(fit$status, "validated-two-level-dsem")
   expect_equal(nrow(fit$random_effects), 10L)
   expect_equal(nrow(fit$random_effects_summary), 20L)
   expect_equal(dim(fit$random_effect_draws)[2:4], c(10L, 2L, 2L))
@@ -98,8 +98,10 @@ test_that("two-level AR(1) estimates population and cluster dynamics", {
   expect_equal(unname(coef(fit)["lag1_y"]), 0.45, tolerance = 0.2)
   expect_true(all(c("tau_intercept", "tau_lag1_y", "sigma2") %in%
                     names(coef(fit))))
-  expect_error(dsem(model, dat, chains = 1, iter = 20, warmup = 10,
-                    engine = "rust"), "R reference engine")
+  fit_rust <- dsem(model, dat, chains = 2, iter = 240, warmup = 120,
+                   seed = 71, engine = "rust")
+  expect_equal(fit_rust$engine, "rust")
+  expect_equal(unname(coef(fit_rust)["lag1_y"]), 0.45, tolerance = 0.2)
 })
 
 test_that("two-level simulation is reproducible and records generating truth", {

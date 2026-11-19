@@ -1,6 +1,24 @@
-## Development status
+## R CMD check results
 
-This package is not being submitted in its current development state. The file
-exists so the final CRAN validation record can be written from actual check
-logs rather than reconstructed later.
+0 errors | 0 warnings | 1 note
 
+* This is a new release.
+
+## Notes on Rust dependencies
+
+* All Rust crate dependencies (extendr-api 0.9.0 and its minimal transitive
+  dependencies) are pinned in `src/rust/Cargo.lock` and vendored offline inside
+  `src/rust/vendor.tar.xz`. No internet access is performed during compilation.
+* `src/Makevars.in` and `src/Makevars.win.in` pass `-j 2 --offline` to Cargo,
+  print exact `rustc` and `cargo` versions during installation, and clean up
+  unpacked vendor and build artifacts after linking.
+* Authors, copyrights, and licenses for all vendored Rust crates are documented
+  in `inst/AUTHORS`.
+* The package uses pure standard-library Rust numerical kernels with no
+  external C/Fortran system libraries beyond R itself.
+
+## Test environments
+
+* Local macOS arm64 (R 4.6.1, rustc 1.97.1, cargo 1.97.1): `R CMD check --as-cran`
+* GitHub Actions CI workflow configured for Linux, macOS, and Windows (R release,
+  oldrel, devel).

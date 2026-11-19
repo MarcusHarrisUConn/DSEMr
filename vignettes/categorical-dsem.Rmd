@@ -1,21 +1,33 @@
 ---
-title: "Categorical DSEM roadmap"
+title: "Binary and ordinal categorical DSEM and dynamic IRT"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Categorical DSEM roadmap}
+  %\VignetteIndexEntry{Binary and ordinal categorical DSEM and dynamic IRT}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
 
-Binary and ordinal DSEM will use an explicit latent-response probit model. Its
-threshold identification, residual scale, centering, lag interpretation, and
-data augmentation must be verified before estimation is enabled.
-
-```{r, eval=FALSE}
-model <- dsem_model("y ~ lag(y, 1)", family = "binary", time = "time")
-dsem(model, data) # capability error in the current release
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 ```
 
-See the categorical DSEM source in `research/manifest.csv` for the primary
-interpretation and parity reference.
+`DSEMr` supports binary and ordinal outcomes and dynamic IRT indicators via
+latent-response probit data augmentation with Mplus-compatible threshold sign
+conventions (`u$1 = -nu`), supporting both observed categorical autoregression
+and single- or two-level dynamic IRT (Mplus Examples 6.27 and 9.35).
 
+```{r}
+library(DSEMr)
+
+dat_bin <- simulate_dsem(
+  n = 100, intercept = 0.2, ar = 0.45, sigma = 1,
+  family = "binary", seed = 627
+)
+m_bin <- dsem_model("y ~ lag(y, 1)", family = "binary", time = "time")
+fit_bin <- dsem(m_bin, dat_bin, chains = 2, iter = 300, warmup = 150, seed = 627)
+coef(fit_bin)
+```
+
+Dynamic binary IRT with fixed factor innovation variance (`f@1`) and free item
+loadings compiles directly from Mplus syntax (`VARIABLE: CATEGORICAL = u1-u4;`)
+or `lavaan` syntax with `categorical = c("u1", "u2", "u3", "u4")`.

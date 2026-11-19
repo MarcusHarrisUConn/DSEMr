@@ -7,23 +7,28 @@ vignette: >
   %\VignetteEncoding{UTF-8}
 ---
 
-Monte Carlo seeds are derived from the master seed, model identity, and
-replication index. They do not depend on dispatch order.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
 
-```{r, eval=FALSE}
+Monte Carlo seeds in `DSEMr` are derived deterministically from the master seed,
+canonical model hash, and replication index. Results are therefore invariant to
+worker count and dispatch order across local workstations and HPC clusters.
+
+```{r}
 library(DSEMr)
+
 model <- dsem_model("y ~ lag(y, 1)", time = "time")
 study <- dsem_monte_carlo(
   model,
-  replications = 100,
-  generator = function(seed) simulate_dsem(n = 150, ar = 0.6, seed = seed),
+  replications = 3,
+  generator = function(seed) simulate_dsem(n = 80, ar = 0.5, seed = seed),
+  fit_args = list(chains = 2, iter = 200, warmup = 100),
   seed = 2026,
-  truth = c("(Intercept)" = 0, lag1_y = 0.6, sigma2 = 1)
+  truth = c("(Intercept)" = 0, lag1_y = 0.5, sigma2 = 1)
 )
 study$summary
 ```
 
-The call is not evaluated while building the vignette because a defensible
-simulation study should be run as a separate, archived analysis with adequate
-iterations and computing resources.
-
+For full methodological simulation studies, scale `replications` and chain
+lengths and pass `compute = dsem_compute(workers = ..., backend = "psock")`.

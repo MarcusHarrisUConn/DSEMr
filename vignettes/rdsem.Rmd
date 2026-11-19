@@ -1,20 +1,49 @@
 ---
-title: "Residual DSEM roadmap"
+title: "Residual dynamic structural equation modeling (RDSEM)"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Residual DSEM roadmap}
+  %\VignetteIndexEntry{Residual dynamic structural equation modeling (RDSEM)}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
 
-RDSEM places dynamic relations on residual processes, distinct from lagging the
-observed outcome. DSEMr records residual-dynamic intent separately in the common
-representation so it cannot be silently treated as ordinary DSEM.
-
-```{r, eval=FALSE}
-model <- dsem_model("y ~ residual(lag(y, 1))", time = "time")
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 ```
 
-This syntax and its estimator will remain disabled until the published RDSEM
-equations, scripts, and simulations have machine-readable parity records.
+Residual DSEM (RDSEM; Asparouhov & Muthen, 2020) separates contemporaneous
+structural regressions and time trends from autoregressive dynamics on the
+within-level residual process ($y_{t} = \alpha + \beta x_t + \hat{y}_t$,
+$\hat{y}_t = \phi \hat{y}_{t-1} + \epsilon_t$).
 
+`DSEMr` represents residual dynamics explicitly in both `lavaan` syntax
+(`y ~ residual(lag(y, 1)) + x`) and Mplus caret syntax (`y^ ON y^1; y ON x;`).
+
+```{r}
+library(DSEMr)
+
+set.seed(2020)
+n <- 120
+x <- rnorm(n)
+u <- numeric(n)
+u[1] <- rnorm(1)
+for (t in 2:n) u[t] <- 0.55 * u[t - 1] + rnorm(1, sd = 0.6)
+dat <- data.frame(time = seq_len(n), x = x, y = 0.5 + 1.2 * x + u)
+
+m_rdsem <- dsem_model("y ~ residual(lag(y, 1)) + x", time = "time")
+fit_rdsem <- dsem(m_rdsem, dat, chains = 2, iter = 300, warmup = 150, seed = 2020)
+coef(fit_rdsem)
+```
+
+Equivalent Mplus syntax compiles to the identical canonical model:
+
+```{r}
+m_mplus <- mplus_to_dsem("
+  ANALYSIS: ESTIMATOR = BAYES;
+  MODEL:
+    %WITHIN%
+    y^ ON y^1;
+    y ON x;
+", time = "time")
+identical(m_rdsem$terms, m_mplus$terms)
+```

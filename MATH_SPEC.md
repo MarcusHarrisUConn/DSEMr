@@ -1,70 +1,108 @@
-# Mathematical specification
+# Mathematical specification (DSEMr 0.1.0)
 
-## Foundation Gaussian AR(1)
+## 1. Single-level (`N=1`) VAR(p), Covariate, RDSEM, and Categorical Probit
 
-The implemented foundation model is
-
-\[
-y_t = \alpha + \phi y_{t-1} + \mathbf{x}_t^\top\boldsymbol\beta + \epsilon_t,
-\qquad \epsilon_t \sim N(0, \sigma^2).
-\]
-
-After constructing lagged rows and removing rows with missing response or
-predictors, write the model as \(\mathbf{y}=\mathbf{X}\boldsymbol\theta+
-\boldsymbol\epsilon\). The reference Gibbs sampler uses
+For multivariate outcomes \(\mathbf{y}_t \in \mathbb{R}^D\), lags
+\(\ell \in \mathcal{L}\), and exogenous covariates \(\mathbf{x}_t \in \mathbb{R}^{K_x}\):
 
 \[
-\boldsymbol\theta \sim N(\mathbf{m}_0, V_0), \qquad
-\sigma^2 \sim \operatorname{IG}(a_0,b_0).
+\mathbf{y}_t = \boldsymbol\alpha + \sum_{\ell \in \mathcal{L}} \Phi_\ell \mathbf{y}_{t-\ell}
++ B_x \mathbf{x}_t + \boldsymbol\epsilon_t, \qquad \boldsymbol\epsilon_t \sim N(\mathbf{0}, \Sigma).
 \]
 
-Conditionals are
+Under **RDSEM** (Asparouhov & Muthén, 2020), dynamics operate on structural residuals:
 
 \[
-V_n=(X^\top X+V_0^{-1})^{-1},\quad
-m_n=V_n(X^\top y+V_0^{-1}m_0),
+\mathbf{y}_t = \boldsymbol\alpha + B_x \mathbf{x}_t + \mathbf{u}_t, \qquad
+\mathbf{u}_t = \sum_{\ell \in \mathcal{L}} \Phi_\ell \mathbf{u}_{t-\ell} + \boldsymbol\epsilon_t.
 \]
+
+Binary and ordinal outcomes (\(y_{tj} \in \{0, \dots, K_j - 1\}\)) use Albert–Chib
+probit data augmentation \(y_{tj}^* \sim N(\mu_{tj}, 1)\) with thresholds
+\(\tau_{j,1} < \dots < \tau_{j,K_j-1}\) and Mplus threshold sign convention
+\(\tau_{j,1} = -\alpha_j\). Prior modes support weakly informative conjugate
+priors (`prior_mode = "default"`), Mplus compatibility priors (`"mplus"`, flat
+coefficients and \(IG(-1, 0)\)), and Mplus Version 9 penalized shrinkage priors
+(`"penalized"`, Bayesian Lasso scale mixtures).
+
+## 2. Two-Level Location-Scale DSEM & RDSEM (Mplus 9.30–9.32, 9.37)
+
+Observed variables are latently decomposed into between- and within-person
+components \(\mathbf{y}_{it} = \boldsymbol\mu_i + \mathbf{y}_{it}^{(w)}\) and
+\(\mathbf{x}_{it} = \boldsymbol\mu_{xi} + \mathbf{x}_{it}^{(w)}\) (or group-mean
+centered via `DEFINE: CENTER x (GROUPMEAN)`):
 
 \[
-\boldsymbol\theta\mid\sigma^2,y \sim N(m_n,\sigma^2V_n),
+\mathbf{y}_{it}^{(w)} = \sum_{\ell \in \mathcal{L}} \Phi_{i\ell} \mathbf{y}_{i,t-\ell}^{(w)}
++ B_{xi} \mathbf{x}_{it}^{(w)} + \boldsymbol\epsilon_{it}, \qquad
+\epsilon_{itj} \sim N\!\left(0, \exp(\omega_{ij})\right).
 \]
 
-and
+Random intercepts, random slopes, and random log innovation variances are
+collected into \(\boldsymbol\theta_i = (\boldsymbol\mu_i^\top, \mathbf{s}_i^\top, \boldsymbol\omega_i^\top)^\top\):
 
 \[
-\sigma^2\mid\boldsymbol\theta,y \sim
-\operatorname{IG}\left(a_0+n/2,
-b_0+(y-X\boldsymbol\theta)^\top(y-X\boldsymbol\theta)/2\right).
+\boldsymbol\theta_i = \boldsymbol\gamma_0 + \Gamma_w \mathbf{w}_i + \boldsymbol\zeta_i,
+\qquad \boldsymbol\zeta_i \sim N(\mathbf{0}, \Omega_B),
 \]
 
-The defaults approximate the published diffuse Mplus priors for regression
-coefficients and univariate residual variance. They remain explicitly marked as
-experimental until public finite-sample comparisons are complete.
+with optional between-level distal outcomes \(\mathbf{z}_i = \boldsymbol\alpha_z + B_z \boldsymbol\theta_i + D_z \mathbf{w}_i + \boldsymbol\varepsilon_{zi}\)
+jointly integrated in the conditional posterior of \(\boldsymbol\theta_i\).
+Irregular timestamps are aligned via `TINTERVAL` (`dsem_tinterval()`) and missing
+observations are Gibbs-imputed across gaps.
 
-## Experimental two-level Gaussian AR(1)
+## 3. Three-Level DSEM (`DSEM3`, Mplus Version 9)
 
-The implemented reference sampler currently uses
+For occasion \(t\) nested within Level-2 unit \(c\) nested within Level-3 cluster \(g\)
+(Asparouhov & Muthén, 2026), variables undergo three-level latent decomposition:
 
 \[
-y_{it}=\alpha_i+\phi_i y_{i,t-1}+e_{it},
-\qquad e_{it}\sim N(0,\sigma^2),
+y_{gct} = y_g^{(3)} + y_{gc}^{(2)} + y_{gct}^{(1)}, \qquad
+x_{gct} = x_g^{(3)} + x_{gc}^{(2)} + x_{gct}^{(1)}.
 \]
 
-with \(\boldsymbol\theta_i=(\alpha_i,\phi_i)^\top\sim
-N(\boldsymbol\mu,\Omega)\). The population mean has a diffuse normal prior,
-\(\Omega\) has an inverse-Wishart prior, and \(\sigma^2\) has an inverse-gamma
-prior. All person-specific posterior draws are retained and summarized.
+Cluster parameters follow \(\theta_{gc,q} = \gamma_{0q} + \mathbf{w}_g^{(3)\top}\boldsymbol\gamma_{3q} + \mathbf{w}_{gc}^{(2)\top}\boldsymbol\gamma_{2q} + u_{g,q}^{(3)} + u_{gc,q}^{(2)}\)
+with \(\mathbf{u}_g^{(3)} \sim N(\mathbf{0}, \Omega^{(3)})\) and
+\(\mathbf{u}_{gc}^{(2)} \sim N(\mathbf{0}, \Omega^{(2)})\), sampled via exact
+alternating Gibbs for intercepts and slopes plus Metropolis–Hastings for random
+log innovation variances.
 
-The likelihood includes only adjacent observations at the declared regular time
-interval. It never constructs a lag across an observed time gap. This model does
-not yet implement latent centering, person-specific residual variances,
-between-level predictors, or Mplus-compatible initial-condition integration;
-those remain parity gates.
+## 4. Cross-Classified DSEM (Mplus 9.38–9.40)
 
-## Planned RDSEM and categorical families
+Observations are crossed across subjects \(i = 1, \dots, N\) and occasions \(t = 1, \dots, T\):
 
-RDSEM applies lagged structure to residual processes rather than silently
-equating residual and observed-variable dynamics. Binary and ordinal outcomes
-will use explicit latent-response/probit parameterization and threshold
-identification. These sections are specifications for planned work, not current
-capability claims.
+\[
+\mathbf{y}_{it} = \boldsymbol\gamma_0 + \mathbf{u}_i^{(\text{id})} + \mathbf{v}_t^{(\text{time})} + \mathbf{y}_{it}^{(w)},
+\qquad \mathbf{u}_i^{(\text{id})} \sim N(\Gamma_w \mathbf{w}_i, \Omega_{\text{id}}),
+\quad \mathbf{v}_t^{(\text{time})} \sim N(\mathbf{0}, \Omega_{\text{time}}).
+\]
+
+## 5. Single-Level & Two-Level Dynamic CFA, WNFS, & Dynamic IRT (6.26–6.28, 9.33–9.36)
+
+For \(M\) within-level latent factors \(\boldsymbol\eta_{it}\) and \(J\) continuous
+or binary/ordinal probit indicators:
+
+\[
+\mathbf{y}_{it}^{(*)} = \boldsymbol\nu_i + \Lambda_0 \boldsymbol\eta_{it} + \Lambda_1 \boldsymbol\eta_{i,t-1} + \boldsymbol\epsilon_{it}, \qquad
+\boldsymbol\eta_{it} = \Phi_i \boldsymbol\eta_{i,t-1} + \boldsymbol\zeta_{it}, \qquad
+\boldsymbol\zeta_{it} \sim N(\mathbf{0}, \Psi_i).
+\]
+
+- **DAFS** (\(\Lambda_1 = 0\)) uses multivariate Kalman filtering and Carter–Kohn
+  backward simulation smoothing (FFBS) with Lyapunov stationary initial covariance.
+- **WNFS** (\(\Lambda_1 \ne 0\), Mplus 6.26b) uses non-degenerate companion-form
+  block-conditional backward smoothing over \((\boldsymbol\eta_t, \boldsymbol\eta_{t-1})\).
+- Two-level models decompose \(\boldsymbol\nu_i = \boldsymbol\nu_0 + \Lambda_B \mathbf{f}_i^{(b)} + \mathbf{e}_i^{(b)}\)
+  (with optional cross-level loading invariance \(\Lambda_0 = \Lambda_B\)) and
+  jointly model \((\mathbf{f}_i^{(b)}, \mathbf{s}_i, \boldsymbol\omega_i) \sim N(\mathbf{0}, \Omega_B)\).
+
+## 6. Fit Criteria, Standardization, & Diagnostics
+
+- **DIC & pD:** \(\bar{D} = E[-2 \log p(\mathbf{y} \mid \vartheta, \boldsymbol\eta)]\),
+  \(p_D = \bar{D} - D(\bar{\vartheta}, \bar{\boldsymbol\eta})\), \(\text{DIC} = \bar{D} + p_D\).
+- **Within-Cluster Standardization (`STDYX`):** cluster-specific slopes standardized
+  by model-implied within-cluster SDs and averaged across clusters at each posterior
+  draw (Schuurman et al., 2016).
+- **Convergence & Collinearity:** rank-normalized split-\(\hat{R}\), Mplus `PSR`,
+  bulk/tail ESS, MCSE of mean and median, Bayesian one-tailed \(p\)-values, and
+  covariate Variance Inflation Factors (`dsem_vif()`).

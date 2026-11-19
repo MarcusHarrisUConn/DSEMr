@@ -1,0 +1,79 @@
+---
+title: "Three-level (DSEM3) and cross-classified DSEM"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Three-level (DSEM3) and cross-classified DSEM}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+Mplus Version 9 extends dynamic structural equation modeling to three-level
+hierarchies (`TYPE = THREELEVEL RANDOM`, or DSEM3; Asparouhov & Muthen, 2026)
+such as momentary assessments nested within days/bursts (Level 2) nested within
+individuals or clinics (Level 3), alongside subject-by-time cross-classified
+DSEM (`TYPE = CROSSCLASSIFIED RANDOM`).
+
+## Three-level DSEM (`DSEM3`)
+
+In `DSEMr`, three-level hierarchies are declared with `id = c("level2", "level3")`
+in `lavaan` syntax or `VARIABLE: CLUSTER = level3 level2; ANALYSIS: TYPE = THREELEVEL RANDOM;`
+in Mplus syntax. Latent variable decomposition separates Level-1, Level-2, and
+Level-3 variance components automatically.
+
+```{r}
+library(DSEMr)
+
+dat_3l <- simulate_dsem(
+  n = 15, clusters = c(8, 3), id = c("day", "person"),
+  intercept = 1.0, ar = 0.45, sigma = 0.7,
+  random_sd = c(0.35, 0.08, 0.15), seed = 901
+)
+
+m_3l <- dsem_model("
+  VARIABLE: CLUSTER = person day;
+  ANALYSIS: TYPE = THREELEVEL RANDOM; ESTIMATOR = BAYES;
+  MODEL:
+    %WITHIN%
+      s | y ON y&1;
+      logv | y;
+    %BETWEEN day%
+      y;
+    %BETWEEN person%
+      y s logv WITH y s logv;
+", syntax = "mplus", time = "time")
+
+fit_3l <- dsem(m_3l, dat_3l, chains = 2, iter = 300, warmup = 150, seed = 902)
+coef(fit_3l)
+dsem_dic(fit_3l)
+```
+
+## Cross-classified DSEM
+
+Cross-classified DSEM accounts simultaneously for subject-level random dynamics
+and occasion-specific common shocks across all individuals:
+
+```{r}
+dat_cc <- simulate_dsem(
+  n = 16, clusters = 10, intercept = 0.5, ar = 0.40, sigma = 0.6,
+  cross_classified = TRUE, time_sd = 0.30, seed = 940
+)
+
+m_cc <- dsem_model("
+  VARIABLE: CLUSTER = time id;
+  ANALYSIS: TYPE = CROSSCLASSIFIED RANDOM; ESTIMATOR = BAYES;
+  MODEL:
+    %WITHIN%
+      s | y ON y&1;
+    %BETWEEN id%
+      y s;
+    %BETWEEN time%
+      y;
+", syntax = "mplus", time = "time")
+
+fit_cc <- dsem(m_cc, dat_cc, chains = 2, iter = 300, warmup = 150, seed = 941)
+coef(fit_cc)
+```

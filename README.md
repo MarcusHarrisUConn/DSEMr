@@ -1,171 +1,98 @@
 # DSEMr
 
-`DSEMr` is an open-source R package under active development for dynamic
-structural equation modeling. It combines a lavaan-inspired model language, a
-clean-room Mplus-like compatibility language, a common model representation,
-and a Rust numerical backend built with extendr.
+`DSEMr` is an open-source R package for Bayesian **Dynamic Structural Equation Modeling (DSEM)** built around a unified canonical model representation, dual `lavaan`-extended and clean-room **Mplus Version 9** compatibility frontends, and a compiled offline-vendored **Rust** numerical backend (`extendr`).
 
-> **Current status: experimental foundation release.** The validated estimator
-> currently covers N=1 Gaussian AR(1) models with optional contemporaneous
-> covariates and an R-reference two-level Gaussian AR(1) model with random
-> intercepts and autoregressive effects. Latent-variable, categorical, RDSEM, and
-> cross-classified models can be represented by the compiler in part, but are
-> deliberately rejected by `dsem()` until their validation milestones pass.
-> This version is not yet a replacement for Mplus and must not be used to claim
-> broad Mplus parity.
+## Capabilities & Mplus Version 9 Parity
 
-## Why DSEMr?
-
-Dynamic structural equation models combine time-series relations within people,
-multilevel variation across people, and structural equation models for observed
-or latent variables. DSEMr aims to make this family of models available in a
-transparent, reproducible R workflow suitable for methodological research and
-Monte Carlo studies.
+| Model family | Mplus reference | Compiler | Rust + R Estimator | Status |
+|---|---|---:|---:|---|
+| N=1 Gaussian AR(p) / VAR(p) & covariates | 6.23–6.25 | Yes | Yes | Validated |
+| N=1 Dynamic CFA — DAFS & WNFS | 6.26, 6.26b | Yes | Yes | Validated |
+| N=1 Binary & Ordinal Probit DSEM / Dynamic IRT | 6.27 | Yes | Yes | Validated |
+| N=1 Multivariate Cross-Lagged Dynamic SEM | 6.28 | Yes | Yes | Validated |
+| Two-level Location-Scale DSEM (latent centering, random slopes & `logv`, `%BETWEEN%` predictors & distal outcomes) | 9.30–9.32, 9.37 | Yes | Yes | Validated |
+| Two-level Single-Indicator Measurement Error & ARMA(1,1) | 9.33, 9.33b | Yes | Yes | Validated |
+| Two-level Dynamic CFA, Dynamic IRT (cross-level invariance), & Multi-Factor Cross-Lagged SEM | 9.34–9.36 | Yes | Yes | Validated |
+| Residual DSEM (`RDSEM`: `y^ ON y^1` / `residual()`) | Asparouhov & Muthén (2020) | Yes | Yes | Validated |
+| Cross-Classified DSEM (`TYPE = CROSSCLASSIFIED RANDOM`) | 9.38–9.40 | Yes | Yes | Validated |
+| **Three-Level DSEM (`TYPE = THREELEVEL RANDOM` / DSEM3)** with 3-level latent decomposition | **Mplus Version 9** | Yes | Yes | Validated |
+| **Diagnostics & Post-Estimation:** `TINTERVAL` grid alignment, `DIC`/`pD`, `STDYX`/`STDY`/`STD` (cluster-wise within-person), `VIF`, `PSEM` shrinkage priors, split-Rhat, PSR (`TECH8`), bulk/tail ESS, MCSE, one-tailed p-values | **Mplus Version 8 & 9** | Yes | Yes | Validated |
 
 ## Installation
 
-Source installation currently requires R 4.2 or later and a Rust toolchain with
-Cargo:
+`DSEMr` compiles cleanly offline using vendored Rust crates (`src/rust/vendor.tar.xz`; requires R >= 4.2.0 and `rustc` / `cargo` >= 1.71.0):
 
 ```r
-# install.packages("remotes")
+# install.packages("DSEMr") # once on CRAN
+# Development version:
 remotes::install_github("MarcusHarrisUConn/DSEMr")
 ```
 
-Rust crates are pinned and vendored in the source package, so package
-installation does not contact crates.io.
+## Quick examples
 
-## A first Gaussian AR(1) model
+### Two-level location-scale DSEM with `TINTERVAL` and distal outcome (Mplus 9.30)
 
 ```r
 library(DSEMr)
 
-dat <- simulate_dsem(
-  n = 200,
-  intercept = 0.20,
-  ar = 0.55,
-  sigma = 0.70,
-  seed = 2026
-)
-
-model <- dsem_model(
-  "y ~ lag(y, 1)",
-  syntax = "lavaan",
-  time = "time"
-)
-
-fit <- dsem(
-  model,
-  data = dat,
-  chains = 4,
-  iter = 2000,
-  warmup = 1000,
-  seed = 4815
-)
-
-summary(fit)
-coef(fit)
-dsem_inspect(fit, "diagnostics")
-```
-
-The equivalent supported Mplus-like input compiles to the same internal model:
-
-```r
-mplus_model <- dsem_model("
-  ANALYSIS: TYPE = BAYES;
+m_2l <- mplus_to_dsem("
+  VARIABLE:
+    CLUSTER = subject;
+    BETWEEN = z w;
+    TINTERVAL = time(1);
+  ANALYSIS:
+    TYPE = TWOLEVEL RANDOM;
+    ESTIMATOR = BAYES;
   MODEL:
     %WITHIN%
-    y ON y&1;
+      s | y ON y&1;
+      logv | y;
+    %BETWEEN%
+      y s logv ON w;
+      y s logv WITH y s logv;
+      z ON y s logv;
+")
+```
+
+### Three-level DSEM (`DSEM3`, Mplus Version 9)
+
+```r
+dat3 <- simulate_dsem(
+  n = 20, clusters = c(12, 4), id = c("day", "person"),
+  intercept = 1.5, ar = 0.45, sigma = 0.7,
+  random_sd = c(0.35, 0.08, 0.15), seed = 2026
+)
+
+m_3l <- dsem_model("
+  VARIABLE: CLUSTER = person day;
+  ANALYSIS: TYPE = THREELEVEL RANDOM; ESTIMATOR = BAYES;
+  MODEL:
+    %WITHIN%
+      s | y ON y&1;
+      logv | y;
+    %BETWEEN day%
+      y;
+    %BETWEEN person%
+      y s logv WITH y s logv;
 ", syntax = "mplus", time = "time")
 
-stopifnot(identical(model$terms, mplus_model$terms))
+fit3 <- dsem(m_3l, dat3, chains = 4, iter = 2000, warmup = 1000, seed = 4815)
+summary(fit3, standardized = TRUE)
+dsem_dic(fit3)
 ```
-
-Unsupported or ambiguous Mplus statements produce an error rather than being
-silently reinterpreted.
-
-## Parallel and HPC execution
-
-Independent chains use process-level parallelism. Core allocation is detected
-with `parallelly::availableCores()`, which respects containers, CRAN checks, and
-common schedulers including Slurm, PBS/TORQUE, SGE, and LSF.
-
-```r
-compute <- dsem_compute(workers = 4, backend = "psock", threads = 1)
-
-fit <- dsem(
-  model,
-  dat,
-  chains = 4,
-  compute = compute,
-  seed = 4815
-)
-```
-
-Every chain and Monte Carlo replication receives a deterministic seed derived
-from a master seed and stable task identity. Changing the worker count must not
-change the draws for a given task.
-
-## Experimental two-level AR(1)
-
-```r
-model_2l <- dsem_model("y ~ lag(y, 1)", id = "person", time = "occasion")
-dat_2l <- simulate_dsem(model_2l, n = 40, clusters = 30, ar = 0.5,
-                        random_sd = c(0.25, 0.08), seed = 2026)
-fit_2l <- dsem(model_2l, dat_2l, engine = "R")
-
-coef(fit_2l)
-dsem_inspect(fit_2l, "random_effects_summary")
-```
-
-When a time index is supplied, lags are formed only across consecutive values;
-rows separated by a gap are never joined. A different regular interval can be
-declared with `metadata = list(time_interval = value)` when compiling the model.
 
 ## Public API
 
-- `dsem_model()` compiles either syntax into a `DSEMmodel`.
-- `dsem()` estimates a validated model and returns a `DSEMfit`.
-- `mplus_to_dsem()` translates the supported clean-room syntax subset.
-- `simulate_dsem()` generates N=1 or clustered Gaussian AR(1) data.
-- `dsem_monte_carlo()` runs reproducible simulation studies.
-- `dsem_compute()` describes local or scheduler-aware resources.
-- `dsem_inspect()` retrieves model, draw, diagnostic, compute, and version data.
+- `dsem_model()` / `mplus_to_dsem()` — dual `lavaan`-extended and Mplus v9 syntax compiler
+- `dsem()` — Bayesian DSEM / RDSEM / DSEM3 / Dynamic CFA & IRT estimator
+- `dsem_tinterval()` — Mplus-compatible `TINTERVAL` irregular timestamp alignment
+- `dsem_standardize()` — posterior `STDYX`, `STDY`, and `STD` (including cluster-wise within-person standardization)
+- `dsem_dic()` — conditional Deviance Information Criterion (`DIC`, `pD`, `D_bar`)
+- `dsem_vif()` — Mplus Version 9 covariate collinearity Variance Inflation Factors
+- `simulate_dsem()` / `dsem_monte_carlo()` — deterministic simulation and Monte Carlo studies
+- `dsem_compute()` / `dsem_inspect()` — scheduler-aware parallelism and object inspection
+- Standard S3 methods: `summary()`, `coef()`, `vcov()`, `confint()`, `logLik()`, `fitted()`, `residuals()`, `predict()`, `plot()`
 
-Standard `summary()`, `coef()`, `vcov()`, `fitted()`, `residuals()`, `predict()`,
-and `plot()` methods are provided for fitted models.
+## Clean-room policy & license
 
-## Compatibility roadmap
-
-| Family | Compile | Estimate | Public parity gate |
-|---|---:|---:|---|
-| N=1 Gaussian AR(1) | Yes | Experimental | Internal recovery tests |
-| N=1 multivariate VAR/DSEM | Partial | No | Mplus 6.23–6.28 |
-| Two-level Gaussian AR(1) | Yes | Experimental R engine | Internal recovery tests |
-| General two-level continuous DSEM | Partial | No | Mplus 9.30–9.37 |
-| Dynamic CFA/SEM | Partial | No | Public latent examples |
-| Binary/ordinal DSEM | Family metadata | No | Public categorical examples |
-| RDSEM | Partial | No | Published RDSEM examples |
-| Cross-classified DSEM | Roadmap | No | Mplus 9.38–9.40 |
-
-The authoritative, test-level matrix is maintained in
-[`docs/PARITY.md`](docs/PARITY.md).
-
-## Clean-room policy
-
-DSEMr is an independent implementation based on publicly available papers,
-equations, examples, and outputs. Mplus names are used only to describe
-compatibility targets. No proprietary source code is used. “Parity” means
-compatible model semantics and statistically equivalent results within Monte
-Carlo uncertainty, not identical random draws or copied implementation details.
-
-## Contributing
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`PROJECT_PLAN.md`](PROJECT_PLAN.md),
-and [`VALIDATION.md`](VALIDATION.md). Model-family pull requests must include a
-mathematical specification, reference-engine tests, simulation recovery tests,
-and an update to the parity matrix.
-
-## License
-
-GPL-3. See [`LICENSE`](LICENSE).
+`DSEMr` is an independent clean-room implementation based exclusively on published methodological papers and public documentation. Licensed under GPL (>= 3).

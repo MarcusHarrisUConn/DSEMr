@@ -1,36 +1,38 @@
 #' Configure DSEMr computation
 #'
 #' Creates a scheduler-aware compute specification. The default worker count
-#' respects process limits, containers, CRAN checks, and common HPC schedulers
-#' through [parallelly::availableCores()].
+#' respects process limits, containers, CRAN check limits, and common HPC
+#' schedulers through [parallelly::availableCores()].
 #'
 #' @param workers Positive number of R worker processes, or `NULL` to detect.
 #' @param threads Positive number of native threads per worker.
 #' @param backend `"sequential"` or process-level `"psock"`.
-#' @param checkpoint Optional directory for future checkpoint files.
+#' @param checkpoint Optional directory for checkpoint files.
 #' @param blas_threads Intended BLAS thread count recorded in the manifest.
-#' @return A `DSEMcompute` object.
+#' @return A `DSEMcompute` object describing worker, thread, and scheduler
+#'   settings.
+#' @examples
+#' dsem_compute()
+#' dsem_compute(workers = 1, backend = "sequential")
 #' @export
 dsem_compute <- function(workers = NULL, threads = 1L,
                          backend = c("sequential", "psock"),
                          checkpoint = NULL, blas_threads = 1L) {
   backend <- match.arg(backend)
-  detected <- parallelly::availableCores(omit = 1L)
-  if (is.null(workers)) workers <- if (backend == "sequential") 1L else detected
-  workers <- as.integer(workers)
-  threads <- as.integer(threads)
-  blas_threads <- as.integer(blas_threads)
-  if (length(workers) != 1L || is.na(workers) || workers < 1L) {
-    .dsem_abort("`workers` must be one positive integer.")
+  detected <- as.integer(parallelly::availableCores(omit = 1L))
+  chk_limit <- tolower(Sys.getenv("_R_CHECK_LIMIT_CORES_", ""))
+  if (chk_limit %in% c("true", "warn")) {
+    detected <- min(detected, 2L)
   }
-  if (length(threads) != 1L || is.na(threads) || threads < 1L) {
-    .dsem_abort("`threads` must be one positive integer.")
-  }
-  if (length(blas_threads) != 1L || is.na(blas_threads) || blas_threads < 1L) {
-    .dsem_abort("`blas_threads` must be one positive integer.")
-  }
+  if (is.null(workers)) workers <- if (backend == "sequential") 1L else max(1L, detected)
+  workers <- .dsem_integer(workers, "workers", 1)
+  threads <- .dsem_integer(threads, "threads", 1)
+  blas_threads <- .dsem_integer(blas_threads, "blas_threads", 1)
   if (backend == "sequential" && workers != 1L) {
     .dsem_abort("The sequential backend requires `workers = 1`.")
+  }
+  if (!is.null(checkpoint) && (!is.character(checkpoint) || length(checkpoint) != 1L || !nzchar(checkpoint))) {
+    .dsem_abort("`checkpoint` must be NULL or a single directory path.")
   }
   scheduler <- .dsem_scheduler()
   out <- list(
@@ -50,7 +52,7 @@ dsem_compute <- function(workers = NULL, threads = 1L,
   if (is.na(hit)) "local" else keys[hit]
 }
 
-#' @export
+#' @exportS3Method base::print
 print.DSEMcompute <- function(x, ...) {
   cat("<DSEMcompute>", x$backend, "\n")
   cat(" workers:", x$workers, " native threads/worker:", x$threads, "\n")
@@ -58,4 +60,3 @@ print.DSEMcompute <- function(x, ...) {
   if (x$oversubscribed) cat(" warning: requested parallelism may oversubscribe the allocation\n")
   invisible(x)
 }
-

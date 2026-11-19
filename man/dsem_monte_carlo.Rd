@@ -23,9 +23,7 @@ dsem_monte_carlo(
 
 \item{seed}{Master simulation seed.}
 
-\item{compute}{Compute specification. Independent replications can be
-dispatched across a PSOCK cluster; deterministic seeds make results
-invariant to worker count and job order.}
+\item{compute}{Compute specification from \code{\link[=dsem_compute]{dsem_compute()}}.}
 
 \item{fit_args}{Named list passed to \code{\link[=dsem]{dsem()}}.}
 
@@ -36,4 +34,13 @@ A \code{DSEMmontecarlo} list with replication estimates and summaries.
 }
 \description{
 Run a reproducible DSEM Monte Carlo study
+}
+\examples{
+mc <- dsem_monte_carlo(
+  "y ~ lag(y, 1)", replications = 2,
+  generator = function(seed) simulate_dsem(n = 50, ar = 0.5, seed = seed),
+  fit_args = list(chains = 2, iter = 120, warmup = 60),
+  truth = c(lag1_y = 0.5)
+)
+mc$summary
 }

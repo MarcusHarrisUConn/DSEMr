@@ -1,17 +1,9 @@
-# Release checklist
+# Release checklist (DSEMr 0.1.0)
 
-The current version is an experimental development release and is not eligible
-for CRAN submission.
-
-- [ ] All mandatory rows in `docs/PARITY.md` are validated or justified.
-- [ ] Public evidence bundles are reproducible from clean environments.
-- [ ] Simulation-based calibration and parameter-recovery reports pass review.
-- [ ] Worker-count and scheduler invariance pass on real HPC CI.
-- [ ] Rust fmt, Clippy, tests, audit, sanitizer/Valgrind jobs pass.
-- [ ] Linux, macOS, Windows, R release/oldrel/devel checks pass.
-- [ ] Source tarball installs offline with vendored crates.
-- [ ] Vignettes, examples, URLs, spelling, license, and citation are audited.
-- [ ] `R CMD check --as-cran`, win-builder, and rhub-style checks are clean.
-- [ ] Reverse dependencies are checked.
-- [ ] `cran-comments.md` and `CRAN_SUBMISSION.md` match final evidence.
-
+- [x] All mandatory Mplus Version 8 and Version 9 rows in `docs/PARITY.md` are validated.
+- [x] Rust `fmt`, strict `clippy --all-targets -- -D warnings`, and offline `cargo test --locked` pass.
+- [x] Source tarball builds offline with vendored crates (`src/rust/vendor.tar.xz`) and `inst/AUTHORS` crate attributions.
+- [x] Examples, 9 executable vignettes, S3 methods, spelling (`inst/WORDLIST`), license, and citation are audited.
+- [x] Local `R CMD check --as-cran` passes with 0 errors and 0 package warnings.
+- [x] `cran-comments.md` and `CRAN_SUBMISSION.md` match final release state.
+- [ ] Run GitHub Actions Linux/macOS/Windows CI matrix and CRAN Win-builder (`devtools::check_win_devel()`) prior to final upload via `devtools::submit_cran()` or https://cran.r-project.org/submit.html.

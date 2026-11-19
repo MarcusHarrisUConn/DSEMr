@@ -7,20 +7,28 @@ vignette: >
   %\VignetteEncoding{UTF-8}
 ---
 
-`dsem_compute()` uses scheduler-aware core detection. Independent chains run in
-separate R processes; Rust kernels never call the R API from worker threads.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+`dsem_compute()` detects available CPU allocations through `parallelly`,
+respecting containers, CRAN check core limits, and HPC schedulers (Slurm,
+PBS/TORQUE, SGE, and LSF). Independent MCMC chains and Monte Carlo replications
+execute across isolated PSOCK worker processes while Rust kernels operate
+purely on copied numeric buffers without calling the R API from worker threads.
 
 ```{r}
 library(DSEMr)
 dsem_compute()
 ```
 
+To dispatch four chains across four worker processes on a workstation or Slurm
+allocation:
+
 ```{r, eval=FALSE}
 compute <- dsem_compute(workers = 4, backend = "psock", threads = 1)
 fit <- dsem(model, data, chains = 4, compute = compute, seed = 4815)
 ```
 
-On Slurm, request resources with `--cpus-per-task` and do not request more DSEMr
-workers than allocated. PBS/TORQUE, SGE, and LSF variables are also recognized
-through `parallelly`.
-
+Because chain seeds are derived solely from `(master_seed, model_hash, chain_id)`,
+changing `workers` does not alter posterior draws.

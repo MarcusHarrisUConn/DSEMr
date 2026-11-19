@@ -1,2 +1,2 @@
-rm -f src/Makevars
-
+#!/bin/sh
+rm -rf src/Makevars src/.cargo src/vendor src/rust/target
