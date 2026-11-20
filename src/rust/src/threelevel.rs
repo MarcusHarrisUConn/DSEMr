@@ -1,4 +1,7 @@
-use crate::linalg::{eye, idx, mat_t_mul, quad_form, rinv_wishart, rmvnorm_precision, spd_invert};
+use crate::linalg::{
+    eye, idx, mat_mul, mat_mul_t, mat_t_mul, mat_vec, rinv_wishart, rmvnorm_precision, spd_invert,
+    symmetrize,
+};
 use crate::rng::Rng;
 use std::f64::consts::PI;
 
@@ -12,7 +15,7 @@ pub struct ThreeLevelOutput {
     pub pd: f64,
 }
 
-/// Mplus Version 9 Three-Level DSEM (DSEM3, Asparouhov & Muthen 2026) exact alternating Gibbs/MH sampler.
+/// Three-Level DSEM (DSEM3, Asparouhov & Muthen 2026) exact simultaneous two-level block Gibbs + Newton-Laplace MH sampler.
 #[allow(clippy::too_many_arguments)]
 pub fn mcmc_threelevel(
     y_in: &[f64],
@@ -139,8 +142,6 @@ pub fn mcmc_threelevel(
     let mut u2: Vec<f64> = vec![0.0_f64; g2_cnt * q_l2.max(1)];
     let mut omega3 = eye(q_l3, 0.1);
     let mut omega2 = eye(q_l2, 0.1);
-    let mh_step3 = vec![0.22_f64; g3_cnt * d];
-    let mh_step2 = vec![0.22_f64; g2_cnt * d];
 
     let n_om3 = q_l3 * (q_l3 + 1) / 2;
     let n_om2 = q_l2 * (q_l2 + 1) / 2;
@@ -310,10 +311,299 @@ pub fn mcmc_threelevel(
             }
         }
 
-        // 2. EXACT ALTERNATING GIBBS for Level-2 random effects:
-        //    2a. L2 random intercepts (given slopes & L3) -> strictly linear!
-        //    2b. L2 random slopes (given updated intercepts & L3) -> strictly linear!
-        //    2c. L2 random log-variances (MH)
+        // 2. SIMULTANEOUS TWO-LEVEL BLOCK GIBBS (Asparouhov & Muthen, 2026b):
+        //    For each Level-3 cluster g, jointly sample (u3[g], {u2[c]}_{c in C_g}) in O(C_g)
+        //    via exact block-arrow Schur complement marginalization (eliminates L2-L3 autocorrelation!).
+        //    2a. Joint (L3, L2) intercepts
+        //    2b. Joint (L3, L2) slopes (conditional on updated intercepts)
+        //    2c. L2 & L3 random log-variances via strictly-concave Newton-Laplace Independence MH
+        for is_slope_block in [false, true] {
+            let l3_pos: &[usize] = if is_slope_block {
+                &l3_sl_pos
+            } else {
+                &l3_int_pos
+            };
+            let l2_pos: &[usize] = if is_slope_block {
+                &l2_sl_pos
+            } else {
+                &l2_int_pos
+            };
+            let n3 = l3_pos.len();
+            let n2 = l2_pos.len();
+            if n3 == 0 && n2 == 0 {
+                continue;
+            }
+            for g in 0..g3_cnt {
+                // Prior precision & info for u3[g, l3_pos] conditional on other u3 slots
+                let mut p00 = vec![0.0; n3 * n3];
+                let mut h0 = vec![0.0; n3];
+                for (a, &pa) in l3_pos.iter().enumerate() {
+                    for (b, &pb) in l3_pos.iter().enumerate() {
+                        p00[idx(a, b, n3)] = om3_inv[idx(pa, pb, q_l3)];
+                    }
+                    for p_o in 0..q_l3 {
+                        if !l3_pos.contains(&p_o) {
+                            h0[a] -= om3_inv[idx(pa, p_o, q_l3)] * u3[idx(g, p_o, g3_cnt)];
+                        }
+                    }
+                }
+
+                // Store per-child (c, P_cc, h_c, P_0c) for exact backward conditional draw
+                type ChildBlock = (usize, Vec<f64>, Vec<f64>, Vec<f64>);
+                let mut child_blocks: Vec<ChildBlock> = Vec::with_capacity(l2_by_l3[g].len());
+
+                let mut u3_z = u3.clone();
+                for &pa in l3_pos {
+                    u3_z[idx(g, pa, g3_cnt)] = 0.0;
+                }
+
+                for &c in &l2_by_l3[g] {
+                    let st = offsets[c];
+                    let en = offsets[c + 1];
+                    let tc = en - st;
+                    let mut pcc = vec![0.0; n2 * n2];
+                    let mut hc = vec![0.0; n2];
+                    let mut p0c = vec![0.0; n3 * n2];
+                    for (a, &pa) in l2_pos.iter().enumerate() {
+                        for (b, &pb) in l2_pos.iter().enumerate() {
+                            pcc[idx(a, b, n2)] = om2_inv[idx(pa, pb, q_l2)];
+                        }
+                        for p_o in 0..q_l2 {
+                            if !l2_pos.contains(&p_o) {
+                                hc[a] -= om2_inv[idx(pa, p_o, q_l2)] * u2[idx(c, p_o, g2_cnt)];
+                            }
+                        }
+                    }
+
+                    if tc > max_lag {
+                        let mut u2_z = u2.clone();
+                        for &pa in l2_pos {
+                            u2_z[idx(c, pa, g2_cnt)] = 0.0;
+                        }
+                        let th_base =
+                            build_theta_gc(c, &gamma0, &gamma_w3, &gamma_w2, &u3_z, &u2_z);
+                        for j in 0..d {
+                            let s2 = th_base[lin_sl_end + j].clamp(-10.0, 10.0).exp();
+                            // Stationary initial-state contribution for pure univariate AR(1) intercepts
+                            if !is_slope_block
+                                && d == 1
+                                && n_lags == 1
+                                && kx == 0
+                                && !residual_dynamics
+                            {
+                                let phi = th_base[d].clamp(-0.95, 0.95);
+                                let w0 = (1.0 - phi * phi).max(0.05) / s2;
+                                let r0 = y_work[idx(st, 0, n_obs)] - th_base[0];
+                                if n3 > 0 {
+                                    p00[0] += w0;
+                                    h0[0] += w0 * r0;
+                                }
+                                if n2 > 0 {
+                                    pcc[0] += w0;
+                                    hc[0] += w0 * r0;
+                                }
+                                if n3 > 0 && n2 > 0 {
+                                    p0c[0] += w0;
+                                }
+                            }
+                            let mut gr3 = vec![0.0; n3];
+                            let mut gr2 = vec![0.0; n2];
+                            for t_loc in max_lag..tc {
+                                let bp = cell_mean_3l(
+                                    &y_work,
+                                    x_in,
+                                    &xb3,
+                                    &xb2,
+                                    latent_center_x,
+                                    g,
+                                    c,
+                                    g3_cnt,
+                                    g2_cnt,
+                                    st,
+                                    t_loc,
+                                    j,
+                                    d,
+                                    kx,
+                                    lags,
+                                    max_lag,
+                                    &th_base,
+                                    residual_dynamics,
+                                    n_obs,
+                                );
+                                let y_rem = y_work[idx(st + t_loc, j, n_obs)] - bp;
+                                for (a, &pa) in l3_pos.iter().enumerate() {
+                                    gr3[a] = sensitivity_3l(
+                                        &y_work,
+                                        x_in,
+                                        &xb3,
+                                        &xb2,
+                                        latent_center_x,
+                                        g,
+                                        c,
+                                        g3_cnt,
+                                        g2_cnt,
+                                        st,
+                                        t_loc,
+                                        j,
+                                        d,
+                                        kx,
+                                        lags,
+                                        &th_base,
+                                        l3_slots[pa],
+                                        residual_dynamics,
+                                        n_obs,
+                                    );
+                                }
+                                for (a, &pa) in l2_pos.iter().enumerate() {
+                                    gr2[a] = sensitivity_3l(
+                                        &y_work,
+                                        x_in,
+                                        &xb3,
+                                        &xb2,
+                                        latent_center_x,
+                                        g,
+                                        c,
+                                        g3_cnt,
+                                        g2_cnt,
+                                        st,
+                                        t_loc,
+                                        j,
+                                        d,
+                                        kx,
+                                        lags,
+                                        &th_base,
+                                        l2_slots[pa],
+                                        residual_dynamics,
+                                        n_obs,
+                                    );
+                                }
+                                let inv_s2 = 1.0 / s2;
+                                for a in 0..n3 {
+                                    h0[a] += gr3[a] * y_rem * inv_s2;
+                                    for b in 0..n3 {
+                                        p00[idx(a, b, n3)] += gr3[a] * gr3[b] * inv_s2;
+                                    }
+                                    for b in 0..n2 {
+                                        p0c[idx(a, b, n3)] += gr3[a] * gr2[b] * inv_s2;
+                                    }
+                                }
+                                for a in 0..n2 {
+                                    hc[a] += gr2[a] * y_rem * inv_s2;
+                                    for b in 0..n2 {
+                                        pcc[idx(a, b, n2)] += gr2[a] * gr2[b] * inv_s2;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Fold child c out of (p00, h0) via exact Schur complement
+                    if n3 > 0 && n2 > 0 {
+                        let pcc_inv = spd_invert(&pcc, n2);
+                        let p0c_inv = mat_mul(&p0c, &pcc_inv, n3, n2, n2);
+                        let schur_p = mat_mul_t(&p0c_inv, &p0c, n3, n2, n3);
+                        let schur_h = mat_vec(&p0c_inv, &hc, n3, n2);
+                        for i in 0..(n3 * n3) {
+                            p00[i] -= schur_p[i];
+                        }
+                        for a in 0..n3 {
+                            h0[a] -= schur_h[a];
+                        }
+                    }
+                    child_blocks.push((c, pcc, hc, p0c));
+                }
+
+                // Draw u3_sub[g] from exact marginal conditional posterior, then u2_sub[c] | u3_sub[g]
+                if n3 > 0 {
+                    symmetrize(&mut p00, n3);
+                }
+                let u3_draw = if n3 > 0 {
+                    rmvnorm_precision(&mut rng, &p00, &h0, n3)
+                } else {
+                    Vec::new()
+                };
+                let mut u2_draws_g: Vec<(usize, Vec<f64>)> = Vec::with_capacity(child_blocks.len());
+                for (c, pcc, hc, p0c) in child_blocks {
+                    if n2 > 0 {
+                        let mut hc_cond = hc;
+                        for b in 0..n2 {
+                            let mut sub = 0.0;
+                            for a in 0..n3 {
+                                sub += p0c[idx(a, b, n3)] * u3_draw[a];
+                            }
+                            hc_cond[b] -= sub;
+                        }
+                        let dr2 = rmvnorm_precision(&mut rng, &pcc, &hc_cond, n2);
+                        u2_draws_g.push((c, dr2));
+                    }
+                }
+
+                // Stationarity check for autoregressive slope block before committing joint draw
+                let mut accept_block = true;
+                if is_slope_block {
+                    for &(c, ref dr2) in &u2_draws_g {
+                        for (a, &pa) in l2_pos.iter().enumerate() {
+                            let q = l2_slots[pa];
+                            let is_ar = (q - d) % n_slopes < n_lags * d;
+                            if is_ar {
+                                let mut tot = gamma0[q] + dr2[a];
+                                if slot_to_l3[q] >= 0 {
+                                    for k in 0..kw3 {
+                                        tot += gamma_w3[idx(k, q, kw3)] * w3_in[idx(g, k, g3_cnt)];
+                                    }
+                                    if let Some(pos3) =
+                                        l3_pos.iter().position(|&p| l3_slots[p] == q)
+                                    {
+                                        tot += u3_draw[pos3];
+                                    } else {
+                                        tot += u3[idx(g, slot_to_l3[q] as usize, g3_cnt)];
+                                    }
+                                }
+                                for k in 0..kw2 {
+                                    tot += gamma_w2[idx(k, q, kw2)] * w2_in[idx(c, k, g2_cnt)];
+                                }
+                                if !tot.is_finite() || tot.abs() >= 0.98 {
+                                    accept_block = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if !accept_block {
+                            break;
+                        }
+                    }
+                    if accept_block && n3 > 0 {
+                        for (a, &pa) in l3_pos.iter().enumerate() {
+                            let q = l3_slots[pa];
+                            let is_ar = (q - d) % n_slopes < n_lags * d;
+                            if is_ar && slot_to_l2[q] < 0 {
+                                let mut tot = gamma0[q] + u3_draw[a];
+                                for k in 0..kw3 {
+                                    tot += gamma_w3[idx(k, q, kw3)] * w3_in[idx(g, k, g3_cnt)];
+                                }
+                                if !tot.is_finite() || tot.abs() >= 0.98 {
+                                    accept_block = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if accept_block {
+                    for (a, &pa) in l3_pos.iter().enumerate() {
+                        u3[idx(g, pa, g3_cnt)] = u3_draw[a];
+                    }
+                    for (c, dr2) in u2_draws_g {
+                        for (a, &pa) in l2_pos.iter().enumerate() {
+                            u2[idx(c, pa, g2_cnt)] = dr2[a];
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2c. L2 random log-variances (strictly-concave Newton-Laplace Independence MH)
         if q_l2 > 0 {
             for c in 0..g2_cnt {
                 let st = offsets[c];
@@ -323,192 +613,11 @@ pub fn mcmc_threelevel(
                     continue;
                 }
                 let g = l3_of_l2[c];
-
-                // 2a. L2 intercepts
-                if !l2_int_pos.is_empty() {
-                    let ni = l2_int_pos.len();
-                    let mut u2_z = u2.clone();
-                    for &p in &l2_int_pos {
-                        u2_z[idx(c, p, g2_cnt)] = 0.0;
-                    }
-                    let th_base = build_theta_gc(c, &gamma0, &gamma_w3, &gamma_w2, &u3, &u2_z);
-                    let mut prec = vec![0.0; ni * ni];
-                    let mut info = vec![0.0; ni];
-                    for (a, &pa) in l2_int_pos.iter().enumerate() {
-                        for (b, &pb) in l2_int_pos.iter().enumerate() {
-                            prec[idx(a, b, ni)] = om2_inv[idx(pa, pb, q_l2)];
-                        }
-                        for p_o in 0..q_l2 {
-                            if !l2_int_pos.contains(&p_o) {
-                                info[a] -= om2_inv[idx(pa, p_o, q_l2)] * u2[idx(c, p_o, g2_cnt)];
-                            }
-                        }
-                    }
-                    for j in 0..d {
-                        let s2 = th_base[lin_sl_end + j].clamp(-10.0, 10.0).exp();
-                        // Stationary t=0 contribution for univariate AR(1)
-                        if d == 1 && n_lags == 1 && !residual_dynamics {
-                            let phi = th_base[d].clamp(-0.95, 0.95);
-                            let w0 = (1.0 - phi * phi).max(0.05) / s2;
-                            prec[0] += w0;
-                            info[0] += w0 * (y_work[idx(st, 0, n_obs)] - th_base[0]);
-                        }
-                        for t_loc in max_lag..tc {
-                            let bp = cell_mean_3l(
-                                &y_work,
-                                x_in,
-                                &xb3,
-                                &xb2,
-                                latent_center_x,
-                                g,
-                                c,
-                                g3_cnt,
-                                g2_cnt,
-                                st,
-                                t_loc,
-                                j,
-                                d,
-                                kx,
-                                lags,
-                                max_lag,
-                                &th_base,
-                                residual_dynamics,
-                                n_obs,
-                            );
-                            let y_rem = y_work[idx(st + t_loc, j, n_obs)] - bp;
-                            let mut gr = vec![0.0; ni];
-                            for (a, &pa) in l2_int_pos.iter().enumerate() {
-                                gr[a] = sensitivity_3l(
-                                    &y_work,
-                                    x_in,
-                                    &xb3,
-                                    &xb2,
-                                    latent_center_x,
-                                    g,
-                                    c,
-                                    g3_cnt,
-                                    g2_cnt,
-                                    st,
-                                    t_loc,
-                                    j,
-                                    d,
-                                    kx,
-                                    lags,
-                                    &th_base,
-                                    l2_slots[pa],
-                                    residual_dynamics,
-                                    n_obs,
-                                );
-                            }
-                            for a in 0..ni {
-                                info[a] += gr[a] * y_rem / s2;
-                                for b in 0..ni {
-                                    prec[idx(a, b, ni)] += gr[a] * gr[b] / s2;
-                                }
-                            }
-                        }
-                    }
-                    let dr = rmvnorm_precision(&mut rng, &prec, &info, ni);
-                    for (a, &pa) in l2_int_pos.iter().enumerate() {
-                        u2[idx(c, pa, g2_cnt)] = dr[a];
-                    }
-                }
-
-                // 2b. L2 slopes (conditional on updated intercepts!)
-                if !l2_sl_pos.is_empty() {
-                    let ns = l2_sl_pos.len();
-                    let mut u2_z = u2.clone();
-                    for &p in &l2_sl_pos {
-                        u2_z[idx(c, p, g2_cnt)] = 0.0;
-                    }
-                    let th_base = build_theta_gc(c, &gamma0, &gamma_w3, &gamma_w2, &u3, &u2_z);
-                    let mut prec = vec![0.0; ns * ns];
-                    let mut info = vec![0.0; ns];
-                    for (a, &pa) in l2_sl_pos.iter().enumerate() {
-                        for (b, &pb) in l2_sl_pos.iter().enumerate() {
-                            prec[idx(a, b, ns)] = om2_inv[idx(pa, pb, q_l2)];
-                        }
-                        for p_o in 0..q_l2 {
-                            if !l2_sl_pos.contains(&p_o) {
-                                info[a] -= om2_inv[idx(pa, p_o, q_l2)] * u2[idx(c, p_o, g2_cnt)];
-                            }
-                        }
-                    }
-                    for j in 0..d {
-                        let s2 = th_base[lin_sl_end + j].clamp(-10.0, 10.0).exp();
-                        for t_loc in max_lag..tc {
-                            let bp = cell_mean_3l(
-                                &y_work,
-                                x_in,
-                                &xb3,
-                                &xb2,
-                                latent_center_x,
-                                g,
-                                c,
-                                g3_cnt,
-                                g2_cnt,
-                                st,
-                                t_loc,
-                                j,
-                                d,
-                                kx,
-                                lags,
-                                max_lag,
-                                &th_base,
-                                residual_dynamics,
-                                n_obs,
-                            );
-                            let y_rem = y_work[idx(st + t_loc, j, n_obs)] - bp;
-                            let mut gr = vec![0.0; ns];
-                            for (a, &pa) in l2_sl_pos.iter().enumerate() {
-                                gr[a] = sensitivity_3l(
-                                    &y_work,
-                                    x_in,
-                                    &xb3,
-                                    &xb2,
-                                    latent_center_x,
-                                    g,
-                                    c,
-                                    g3_cnt,
-                                    g2_cnt,
-                                    st,
-                                    t_loc,
-                                    j,
-                                    d,
-                                    kx,
-                                    lags,
-                                    &th_base,
-                                    l2_slots[pa],
-                                    residual_dynamics,
-                                    n_obs,
-                                );
-                            }
-                            for a in 0..ns {
-                                info[a] += gr[a] * y_rem / s2;
-                                for b in 0..ns {
-                                    prec[idx(a, b, ns)] += gr[a] * gr[b] / s2;
-                                }
-                            }
-                        }
-                    }
-                    let dr = rmvnorm_precision(&mut rng, &prec, &info, ns);
-                    for (a, &pa) in l2_sl_pos.iter().enumerate() {
-                        let q = l2_slots[pa];
-                        let total_s = th_base[q] + dr[a];
-                        let is_ar = (q - d) % n_slopes < n_lags * d;
-                        if !is_ar || total_s.abs() < 0.98 {
-                            u2[idx(c, pa, g2_cnt)] = dr[a];
-                        }
-                    }
-                }
-
-                // 2c. L2 random log-variances
                 for j in 0..d {
                     let q_lv = lin_sl_end + j;
                     if slot_to_l2[q_lv] >= 0 {
                         let p_lv = slot_to_l2[q_lv] as usize;
-                        let cur_v = u2[idx(c, p_lv, g2_cnt)];
-                        let prop_v = (cur_v + mh_step2[c * d + j] * rng.rnorm()).clamp(-8.0, 8.0);
+                        let mut cur_v = u2[idx(c, p_lv, g2_cnt)];
                         let th_cur = build_theta_gc(c, &gamma0, &gamma_w3, &gamma_w2, &u3, &u2);
                         let mut rss = 0.0;
                         let n_eff = (tc - max_lag) as f64;
@@ -538,232 +647,60 @@ pub fn mcmc_threelevel(
                             rss += e * e;
                         }
                         let base_lv = th_cur[q_lv] - cur_v;
+                        let p_tot = om2_inv[idx(p_lv, p_lv, q_l2)].max(1e-8);
+                        let mut info_tot = 0.0;
+                        for p in 0..q_l2 {
+                            if p != p_lv {
+                                info_tot -= om2_inv[idx(p_lv, p, q_l2)] * u2[idx(c, p, g2_cnt)];
+                            }
+                        }
+                        let m_prior = (info_tot / p_tot).clamp(-8.0, 8.0);
+                        let mut u_mode = m_prior;
+                        for _ in 0..6 {
+                            let exp_m = (-(base_lv + u_mode)).exp().min(1e12);
+                            let g1 = -0.5 * n_eff + 0.5 * exp_m * rss - p_tot * (u_mode - m_prior);
+                            let neg_g2 = (0.5 * exp_m * rss + p_tot).max(1e-6);
+                            let delta = (g1 / neg_g2).clamp(-2.0, 2.0);
+                            u_mode = (u_mode + delta).clamp(-8.0, 8.0);
+                            if delta.abs() < 1e-6 {
+                                break;
+                            }
+                        }
+                        let hess =
+                            (0.5 * (-(base_lv + u_mode)).exp().min(1e12) * rss + p_tot).max(1e-6);
+                        let prop_sd = (1.25 / hess.sqrt()).clamp(0.01, 2.5);
                         let lp_fn = |uv: f64| -> f64 {
                             let lv = base_lv + uv;
-                            let mut u_vec: Vec<f64> =
-                                (0..q_l2).map(|p| u2[idx(c, p, g2_cnt)]).collect();
-                            u_vec[p_lv] = uv;
                             -0.5 * n_eff * lv
-                                - 0.5 * (-lv).exp() * rss
-                                - 0.5 * quad_form(&u_vec, &om2_inv, q_l2)
+                                - 0.5 * (-lv).exp().min(1e12) * rss
+                                - 0.5 * p_tot * (uv - m_prior) * (uv - m_prior)
                         };
-                        if rng.runif().ln() < lp_fn(prop_v) - lp_fn(cur_v) {
-                            u2[idx(c, p_lv, g2_cnt)] = prop_v;
+                        let logq = |uv: f64| -> f64 {
+                            let z = (uv - u_mode) / prop_sd;
+                            -0.5 * z * z
+                        };
+                        for _ in 0..2 {
+                            let prop_v = (u_mode + prop_sd * rng.rnorm()).clamp(-8.0, 8.0);
+                            let log_acc =
+                                (lp_fn(prop_v) - logq(prop_v)) - (lp_fn(cur_v) - logq(cur_v));
+                            if rng.runif().ln() < log_acc {
+                                cur_v = prop_v;
+                            }
                         }
+                        u2[idx(c, p_lv, g2_cnt)] = cur_v;
                     }
                 }
             }
         }
 
-        // 3. EXACT ALTERNATING GIBBS for Level-3 random effects:
-        //    3a. L3 random intercepts (given slopes & L2)
-        //    3b. L3 random slopes (given updated intercepts & L2)
-        //    3c. L3 random log-variances (MH)
+        // 3c. L3 random log-variances (strictly-concave Newton-Laplace Independence MH)
         if q_l3 > 0 {
             for g in 0..g3_cnt {
-                // 3a. L3 intercepts
-                if !l3_int_pos.is_empty() {
-                    let ni = l3_int_pos.len();
-                    let mut u3_z = u3.clone();
-                    for &p in &l3_int_pos {
-                        u3_z[idx(g, p, g3_cnt)] = 0.0;
-                    }
-                    let mut prec = vec![0.0; ni * ni];
-                    let mut info = vec![0.0; ni];
-                    for (a, &pa) in l3_int_pos.iter().enumerate() {
-                        for (b, &pb) in l3_int_pos.iter().enumerate() {
-                            prec[idx(a, b, ni)] = om3_inv[idx(pa, pb, q_l3)];
-                        }
-                        for p_o in 0..q_l3 {
-                            if !l3_int_pos.contains(&p_o) {
-                                info[a] -= om3_inv[idx(pa, p_o, q_l3)] * u3[idx(g, p_o, g3_cnt)];
-                            }
-                        }
-                    }
-                    for &c in &l2_by_l3[g] {
-                        let st = offsets[c];
-                        let en = offsets[c + 1];
-                        let tc = en - st;
-                        if tc <= max_lag {
-                            continue;
-                        }
-                        let th_base = build_theta_gc(c, &gamma0, &gamma_w3, &gamma_w2, &u3_z, &u2);
-                        for j in 0..d {
-                            let s2 = th_base[lin_sl_end + j].clamp(-10.0, 10.0).exp();
-                            if d == 1 && n_lags == 1 && !residual_dynamics {
-                                let phi = th_base[d].clamp(-0.95, 0.95);
-                                let w0 = (1.0 - phi * phi).max(0.05) / s2;
-                                prec[0] += w0;
-                                info[0] += w0 * (y_work[idx(st, 0, n_obs)] - th_base[0]);
-                            }
-                            for t_loc in max_lag..tc {
-                                let bp = cell_mean_3l(
-                                    &y_work,
-                                    x_in,
-                                    &xb3,
-                                    &xb2,
-                                    latent_center_x,
-                                    g,
-                                    c,
-                                    g3_cnt,
-                                    g2_cnt,
-                                    st,
-                                    t_loc,
-                                    j,
-                                    d,
-                                    kx,
-                                    lags,
-                                    max_lag,
-                                    &th_base,
-                                    residual_dynamics,
-                                    n_obs,
-                                );
-                                let y_rem = y_work[idx(st + t_loc, j, n_obs)] - bp;
-                                let mut gr = vec![0.0; ni];
-                                for (a, &pa) in l3_int_pos.iter().enumerate() {
-                                    gr[a] = sensitivity_3l(
-                                        &y_work,
-                                        x_in,
-                                        &xb3,
-                                        &xb2,
-                                        latent_center_x,
-                                        g,
-                                        c,
-                                        g3_cnt,
-                                        g2_cnt,
-                                        st,
-                                        t_loc,
-                                        j,
-                                        d,
-                                        kx,
-                                        lags,
-                                        &th_base,
-                                        l3_slots[pa],
-                                        residual_dynamics,
-                                        n_obs,
-                                    );
-                                }
-                                for a in 0..ni {
-                                    info[a] += gr[a] * y_rem / s2;
-                                    for b in 0..ni {
-                                        prec[idx(a, b, ni)] += gr[a] * gr[b] / s2;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let dr = rmvnorm_precision(&mut rng, &prec, &info, ni);
-                    for (a, &pa) in l3_int_pos.iter().enumerate() {
-                        u3[idx(g, pa, g3_cnt)] = dr[a];
-                    }
-                }
-
-                // 3b. L3 slopes (conditional on updated intercepts!)
-                if !l3_sl_pos.is_empty() {
-                    let ns = l3_sl_pos.len();
-                    let mut u3_z = u3.clone();
-                    for &p in &l3_sl_pos {
-                        u3_z[idx(g, p, g3_cnt)] = 0.0;
-                    }
-                    let mut prec = vec![0.0; ns * ns];
-                    let mut info = vec![0.0; ns];
-                    for (a, &pa) in l3_sl_pos.iter().enumerate() {
-                        for (b, &pb) in l3_sl_pos.iter().enumerate() {
-                            prec[idx(a, b, ns)] = om3_inv[idx(pa, pb, q_l3)];
-                        }
-                        for p_o in 0..q_l3 {
-                            if !l3_sl_pos.contains(&p_o) {
-                                info[a] -= om3_inv[idx(pa, p_o, q_l3)] * u3[idx(g, p_o, g3_cnt)];
-                            }
-                        }
-                    }
-                    for &c in &l2_by_l3[g] {
-                        let st = offsets[c];
-                        let en = offsets[c + 1];
-                        let tc = en - st;
-                        if tc <= max_lag {
-                            continue;
-                        }
-                        let th_base = build_theta_gc(c, &gamma0, &gamma_w3, &gamma_w2, &u3_z, &u2);
-                        for j in 0..d {
-                            let s2 = th_base[lin_sl_end + j].clamp(-10.0, 10.0).exp();
-                            for t_loc in max_lag..tc {
-                                let bp = cell_mean_3l(
-                                    &y_work,
-                                    x_in,
-                                    &xb3,
-                                    &xb2,
-                                    latent_center_x,
-                                    g,
-                                    c,
-                                    g3_cnt,
-                                    g2_cnt,
-                                    st,
-                                    t_loc,
-                                    j,
-                                    d,
-                                    kx,
-                                    lags,
-                                    max_lag,
-                                    &th_base,
-                                    residual_dynamics,
-                                    n_obs,
-                                );
-                                let y_rem = y_work[idx(st + t_loc, j, n_obs)] - bp;
-                                let mut gr = vec![0.0; ns];
-                                for (a, &pa) in l3_sl_pos.iter().enumerate() {
-                                    gr[a] = sensitivity_3l(
-                                        &y_work,
-                                        x_in,
-                                        &xb3,
-                                        &xb2,
-                                        latent_center_x,
-                                        g,
-                                        c,
-                                        g3_cnt,
-                                        g2_cnt,
-                                        st,
-                                        t_loc,
-                                        j,
-                                        d,
-                                        kx,
-                                        lags,
-                                        &th_base,
-                                        l3_slots[pa],
-                                        residual_dynamics,
-                                        n_obs,
-                                    );
-                                }
-                                for a in 0..ns {
-                                    info[a] += gr[a] * y_rem / s2;
-                                    for b in 0..ns {
-                                        prec[idx(a, b, ns)] += gr[a] * gr[b] / s2;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let dr = rmvnorm_precision(&mut rng, &prec, &info, ns);
-                    for (a, &pa) in l3_sl_pos.iter().enumerate() {
-                        let q = l3_slots[pa];
-                        let is_ar = (q - d) % n_slopes < n_lags * d;
-                        let mut base_s = gamma0[q];
-                        for k in 0..kw3 {
-                            base_s += gamma_w3[idx(k, q, kw3)] * w3_in[idx(g, k, g3_cnt)];
-                        }
-                        if !is_ar || (base_s + dr[a]).abs() < 0.98 {
-                            u3[idx(g, pa, g3_cnt)] = dr[a];
-                        }
-                    }
-                }
-
-                // 3c. L3 random log-variances (MH)
                 for j in 0..d {
                     let q_lv = lin_sl_end + j;
                     if slot_to_l3[q_lv] >= 0 {
                         let p_lv = slot_to_l3[q_lv] as usize;
-                        let cur_v = u3[idx(g, p_lv, g3_cnt)];
-                        let prop_v = (cur_v + mh_step3[g * d + j] * rng.rnorm()).clamp(-8.0, 8.0);
+                        let mut cur_v = u3[idx(g, p_lv, g3_cnt)];
                         let mut c_rss: Vec<(f64, f64, f64)> = Vec::new();
                         for &c in &l2_by_l3[g] {
                             let st = offsets[c];
@@ -801,20 +738,55 @@ pub fn mcmc_threelevel(
                             }
                             c_rss.push(((tc - max_lag) as f64, th_c[q_lv] - cur_v, rss));
                         }
+                        let p_tot = om3_inv[idx(p_lv, p_lv, q_l3)].max(1e-8);
+                        let mut info_tot = 0.0;
+                        for p in 0..q_l3 {
+                            if p != p_lv {
+                                info_tot -= om3_inv[idx(p_lv, p, q_l3)] * u3[idx(g, p, g3_cnt)];
+                            }
+                        }
+                        let m_prior = (info_tot / p_tot).clamp(-8.0, 8.0);
+                        let mut u_mode = m_prior;
+                        for _ in 0..6 {
+                            let mut g1 = -p_tot * (u_mode - m_prior);
+                            let mut neg_g2 = p_tot;
+                            for &(ne, blv, rss) in &c_rss {
+                                let exp_m = (-(blv + u_mode)).exp().min(1e12);
+                                g1 += -0.5 * ne + 0.5 * exp_m * rss;
+                                neg_g2 += 0.5 * exp_m * rss;
+                            }
+                            let delta = (g1 / neg_g2.max(1e-6)).clamp(-2.0, 2.0);
+                            u_mode = (u_mode + delta).clamp(-8.0, 8.0);
+                            if delta.abs() < 1e-6 {
+                                break;
+                            }
+                        }
+                        let mut hess = p_tot;
+                        for &(_, blv, rss) in &c_rss {
+                            hess += 0.5 * (-(blv + u_mode)).exp().min(1e12) * rss;
+                        }
+                        let prop_sd = (1.25 / hess.max(1e-6).sqrt()).clamp(0.01, 2.5);
                         let lp_fn = |uv: f64| -> f64 {
-                            let mut lp = 0.0;
+                            let mut lp = -0.5 * p_tot * (uv - m_prior) * (uv - m_prior);
                             for &(ne, blv, rss) in &c_rss {
                                 let lv = blv + uv;
-                                lp += -0.5 * ne * lv - 0.5 * (-lv).exp() * rss;
+                                lp += -0.5 * ne * lv - 0.5 * (-lv).exp().min(1e12) * rss;
                             }
-                            let mut u_vec: Vec<f64> =
-                                (0..q_l3).map(|p| u3[idx(g, p, g3_cnt)]).collect();
-                            u_vec[p_lv] = uv;
-                            lp - 0.5 * quad_form(&u_vec, &om3_inv, q_l3)
+                            lp
                         };
-                        if rng.runif().ln() < lp_fn(prop_v) - lp_fn(cur_v) {
-                            u3[idx(g, p_lv, g3_cnt)] = prop_v;
+                        let logq = |uv: f64| -> f64 {
+                            let z = (uv - u_mode) / prop_sd;
+                            -0.5 * z * z
+                        };
+                        for _ in 0..2 {
+                            let prop_v = (u_mode + prop_sd * rng.rnorm()).clamp(-8.0, 8.0);
+                            let log_acc =
+                                (lp_fn(prop_v) - logq(prop_v)) - (lp_fn(cur_v) - logq(cur_v));
+                            if rng.runif().ln() < log_acc {
+                                cur_v = prop_v;
+                            }
                         }
+                        u3[idx(g, p_lv, g3_cnt)] = cur_v;
                     }
                 }
             }
@@ -829,7 +801,7 @@ pub fn mcmc_threelevel(
         for q in 0..q_tot {
             if slot_to_l3[q] >= 0 {
                 let p_l3 = slot_to_l3[q] as usize;
-                let var_q3 = omega3[idx(p_l3, p_l3, q_l3)].max(1e-6);
+                let o_qq = om3_inv[idx(p_l3, p_l3, q_l3)].max(1e-8);
                 let pw = 1 + kw3;
                 let mut wd = vec![0.0; g3_cnt * pw];
                 let mut yv = vec![0.0; g3_cnt];
@@ -840,18 +812,27 @@ pub fn mcmc_threelevel(
                         wd[idx(g, 1 + k, g3_cnt)] = w3_in[idx(g, k, g3_cnt)];
                         tot += gamma_w3[idx(k, q, kw3)] * w3_in[idx(g, k, g3_cnt)];
                     }
+                    // Exact SUR adjustment for correlated L3 random effects
+                    for p2 in 0..q_l3 {
+                        if p2 != p_l3 {
+                            let o_q2 = om3_inv[idx(p_l3, p2, q_l3)];
+                            if o_q2.abs() > 1e-14 {
+                                tot += (o_q2 / o_qq) * u3[idx(g, p2, g3_cnt)];
+                            }
+                        }
+                    }
                     yv[g] = tot;
                 }
                 let wtw = mat_t_mul(&wd, &wd, pw, g3_cnt, pw);
                 let wty = mat_t_mul(&wd, &yv, pw, g3_cnt, 1);
                 let mut pr = vec![0.0; pw * pw];
                 for i in 0..(pw * pw) {
-                    pr[i] = wtw[i] / var_q3;
+                    pr[i] = wtw[i] * o_qq;
                 }
                 for i in 0..pw {
                     pr[idx(i, i, pw)] += p_pr;
                 }
-                let inf: Vec<f64> = wty.iter().map(|v| v / var_q3).collect();
+                let inf: Vec<f64> = wty.iter().map(|v| v * o_qq).collect();
                 let b = rmvnorm_precision(&mut rng, &pr, &inf, pw);
                 let old_g0 = gamma0[q];
                 let old_gw: Vec<f64> = (0..kw3).map(|k| gamma_w3[idx(k, q, kw3)]).collect();
@@ -868,7 +849,7 @@ pub fn mcmc_threelevel(
                 }
             } else if slot_to_l2[q] >= 0 {
                 let p_l2 = slot_to_l2[q] as usize;
-                let var_q2 = omega2[idx(p_l2, p_l2, q_l2)].max(1e-6);
+                let o_qq = om2_inv[idx(p_l2, p_l2, q_l2)].max(1e-8);
                 let pw = 1 + kw2;
                 let mut wd = vec![0.0; g2_cnt * pw];
                 let mut yv = vec![0.0; g2_cnt];
@@ -879,18 +860,26 @@ pub fn mcmc_threelevel(
                         wd[idx(c, 1 + k, g2_cnt)] = w2_in[idx(c, k, g2_cnt)];
                         tot += gamma_w2[idx(k, q, kw2)] * w2_in[idx(c, k, g2_cnt)];
                     }
+                    for p2 in 0..q_l2 {
+                        if p2 != p_l2 {
+                            let o_q2 = om2_inv[idx(p_l2, p2, q_l2)];
+                            if o_q2.abs() > 1e-14 {
+                                tot += (o_q2 / o_qq) * u2[idx(c, p2, g2_cnt)];
+                            }
+                        }
+                    }
                     yv[c] = tot;
                 }
                 let wtw = mat_t_mul(&wd, &wd, pw, g2_cnt, pw);
                 let wty = mat_t_mul(&wd, &yv, pw, g2_cnt, 1);
                 let mut pr = vec![0.0; pw * pw];
                 for i in 0..(pw * pw) {
-                    pr[i] = wtw[i] / var_q2;
+                    pr[i] = wtw[i] * o_qq;
                 }
                 for i in 0..pw {
                     pr[idx(i, i, pw)] += p_pr;
                 }
-                let inf: Vec<f64> = wty.iter().map(|v| v / var_q2).collect();
+                let inf: Vec<f64> = wty.iter().map(|v| v * o_qq).collect();
                 let b = rmvnorm_precision(&mut rng, &pr, &inf, pw);
                 let old_g0 = gamma0[q];
                 let old_gw: Vec<f64> = (0..kw2).map(|k| gamma_w2[idx(k, q, kw2)]).collect();

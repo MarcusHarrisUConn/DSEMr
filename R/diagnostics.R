@@ -1,3 +1,14 @@
+.dsem_suppress_ess_cap <- function(expr) {
+  withCallingHandlers(
+    expr,
+    warning = function(w) {
+      if (grepl("ESS has been capped", conditionMessage(w), fixed = TRUE)) {
+        invokeRestart("muffleWarning")
+      }
+    }
+  )
+}
+
 .dsem_compute_diagnostics <- function(draws) {
   if (!is.numeric(draws) || length(dim(draws)) != 3L || any(dim(draws) == 0L)) {
     .dsem_abort("`draws` must be a numeric iteration-by-parameter-by-chain array.")
@@ -24,7 +35,10 @@
       NA_real_
     }
     mcse_med <- if (non_const) {
-      tryCatch(as.numeric(posterior::mcse_quantile(mat, probs = 0.5)), error = function(e) NA_real_)
+      tryCatch(
+        .dsem_suppress_ess_cap(as.numeric(posterior::mcse_quantile(mat, probs = 0.5))),
+        error = function(e) NA_real_
+      )
     } else {
       NA_real_
     }
@@ -32,9 +46,9 @@
       parameter = params[j],
       rhat = if (non_const) posterior::rhat(mat) else NA_real_,
       psr = psr_val,
-      ess_bulk = if (non_const) posterior::ess_bulk(mat) else NA_real_,
-      ess_tail = if (non_const) posterior::ess_tail(mat) else NA_real_,
-      mcse_mean = if (non_const) posterior::mcse_mean(mat) else NA_real_,
+      ess_bulk = if (non_const) .dsem_suppress_ess_cap(posterior::ess_bulk(mat)) else NA_real_,
+      ess_tail = if (non_const) .dsem_suppress_ess_cap(posterior::ess_tail(mat)) else NA_real_,
+      mcse_mean = if (non_const) .dsem_suppress_ess_cap(posterior::mcse_mean(mat)) else NA_real_,
       mcse_median = mcse_med,
       p_one_tailed = p_one,
       stringsAsFactors = FALSE
@@ -62,8 +76,7 @@
 #' Compute covariate Variance Inflation Factors (VIF) for DSEM models
 #'
 #' Evaluates predictor collinearity across within-level and between-level
-#' regression blocks, providing parity with Mplus Version 9's built-in VIF
-#' diagnostics.
+#' regression blocks, reporting \eqn{\text{VIF}_j = 1 / (1 - R^2_j)}.
 #'
 #' @param object Either a fitted `DSEMfit` object or a compiled `DSEMmodel`.
 #' @param data Optional data frame (required when `object` is a `DSEMmodel`, or
@@ -161,7 +174,7 @@ dsem_vif <- function(object, data = NULL) {
 #'
 #' Returns the Deviance Information Criterion (`DIC`), effective number of
 #' parameters (`pD`), posterior mean deviance (`D_bar`), and log-likelihood
-#' summary from a fitted `DSEMfit` object, matching Mplus `MODEL FIT INFORMATION`.
+#' summary from a fitted `DSEMfit` object.
 #'
 #' @param object A fitted `DSEMfit` object.
 #' @return Named numeric vector containing `dic`, `pd`, `d_bar`, and `log_lik`.

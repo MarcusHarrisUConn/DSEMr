@@ -8,8 +8,10 @@ dsem_inspect(
   object,
   what = c("model", "terms", "estimates", "draws", "diagnostics", "compute", "versions",
     "fit", "random_effects", "random_effects_summary", "random_effect_draws",
-    "latent_states", "latent_draws", "prior", "sampler", "identification",
-    "standardized", "vif")
+    "l2_random_effects", "l2_random_effects_summary", "l2_random_effect_draws",
+    "time_effects", "time_effects_summary", "time_effect_draws", "latent_states",
+    "latent_draws", "prior", "sampler", "identification", "standardized", "r2", "vif",
+    "partial_cor")
 )
 }
 \arguments{

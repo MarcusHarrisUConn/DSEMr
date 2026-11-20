@@ -1,11 +1,11 @@
 #' Align irregular timestamps onto a regular DSEM time grid
 #'
-#' Implements clean-room time-interval discretization matching the Mplus
-#' `TINTERVAL` procedure (Asparouhov, Hamaker, & Muthen, 2018). Continuous or
-#' unequally spaced timestamps are mapped onto an integer grid of multiples of
-#' `delta`, preserving observation order within each cluster and inserting
-#' explicit `NA` rows at unobserved time bins so lagged transitions correspond
-#' to uniform elapsed time.
+#' Implements order-preserving time-interval discretization (`TINTERVAL`;
+#' Asparouhov, Hamaker, & Muthen, 2018). Continuous or unequally spaced
+#' timestamps are mapped onto an integer grid of multiples of `delta`,
+#' preserving observation order within each cluster and inserting explicit `NA`
+#' rows at unobserved time bins so lagged transitions correspond to uniform
+#' elapsed time.
 #'
 #' @param data A data frame in long format.
 #' @param time Name of the numeric, `Date`, or `POSIXt` time column.

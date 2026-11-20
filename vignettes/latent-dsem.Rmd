@@ -36,6 +36,7 @@ dsem_dic(fit_dafs)
 head(dsem_inspect(fit_dafs, "latent_states"))
 ```
 
-White-noise factor score (WNFS, Mplus Example 6.26b), multi-factor cross-lagged
-dynamic SEM (Mplus 6.28 and 9.36), and two-level dynamic CFA (Mplus 9.34) are
-compiled and estimated directly through the same `dsem()` interface.
+White-noise factor score (WNFS; Zhang & Nesselroade, 2007), multi-factor
+cross-lagged dynamic SEM, and two-level dynamic CFA models (Asparouhov,
+Hamaker, & Muthen, 2018) are compiled and estimated directly through the same
+`dsem()` interface.

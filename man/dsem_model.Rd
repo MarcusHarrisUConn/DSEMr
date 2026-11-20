@@ -13,6 +13,7 @@ dsem_model(
   level_type = c("auto", "single", "twolevel", "threelevel", "crossclassified"),
   time_cluster = NULL,
   categorical = NULL,
+  censored = NULL,
   tinterval = NULL,
   centering = c("latent", "groupmean", "grandmean", "none"),
   metadata = list()
@@ -25,7 +26,7 @@ dsem_model(
 
 \item{id}{Optional cluster identifier column name (length 1 for two-level or
 cross-classified models; length 2 \code{c("level2", "level3")} for three-level
-DSEM3 models, ordered from Level 2 to Level 3). When \code{NULL} and Mplus
+DSEM3 models, ordered from Level 2 to Level 3). When \code{NULL} and script
 syntax declares \code{CLUSTER = ...}, cluster names are inferred automatically.}
 
 \item{time}{Optional time index column name.}
@@ -41,12 +42,17 @@ models (\code{TYPE = CROSSCLASSIFIED}). Defaults to \code{time} when \code{level
 \item{categorical}{Optional character vector of binary or ordinal variable
 names modeled with a probit link.}
 
-\item{tinterval}{Optional positive numeric bin width for Mplus-compatible
-\code{TINTERVAL} grid alignment.}
+\item{censored}{Optional Tobit censoring specification for floor/ceiling
+continuous outcomes: \code{NULL}, a character vector of left-censored outcome
+names, or a named list mapping outcome names to \code{"below"}, \code{"above"},
+\code{"both"}, or explicit numeric bounds \code{c(lower, upper)}.}
+
+\item{tinterval}{Optional positive numeric bin width for regular-grid
+\code{TINTERVAL} time alignment.}
 
 \item{centering}{Within-cluster centering policy for covariates and outcomes:
-\code{"latent"} (Mplus default latent variable decomposition across 2 or 3
-levels), \code{"groupmean"}, \code{"grandmean"}, or \code{"none"}.}
+\code{"latent"} (default latent variable decomposition across 2 or 3 levels),
+\code{"groupmean"}, \code{"grandmean"}, or \code{"none"}.}
 
 \item{metadata}{Optional named list retained with the compiled model.}
 }
@@ -54,14 +60,15 @@ levels), \code{"groupmean"}, \code{"grandmean"}, or \code{"none"}.}
 A \code{DSEMmodel} object.
 }
 \description{
-Compiles either the \code{DSEMr} extension of \code{lavaan} syntax or the clean-room
-Mplus Version 9 compatibility syntax into a canonical \code{DSEMmodel}
+Compiles either the \code{DSEMr} extension of \code{lavaan} syntax or standard
+section-based SEM/Mplus-compatible model scripts into a canonical \code{DSEMmodel}
 intermediate representation. Supports single-level (\code{N=1}), two-level
 (\verb{TWOLEVEL RANDOM}), three-level (\verb{THREELEVEL RANDOM} / DSEM3), and
 cross-classified (\verb{CROSSCLASSIFIED RANDOM}) dynamic structural equation
-models, including latent centering, random slopes, random log innovation
-variances, residual dynamics (RDSEM), dynamic factor models (DAFS and WNFS),
-binary/ordinal probit links, and penalized shrinkage priors (PSEM).
+models, including latent variable centering, random slopes, random log
+innovation variances, residual dynamics (RDSEM), dynamic factor models
+(DAFS and WNFS), binary/ordinal probit links, Tobit censored outcomes, and
+penalized shrinkage priors (PSEM).
 }
 \examples{
 m1 <- dsem_model("y ~ lag(y, 1)", time = "time")

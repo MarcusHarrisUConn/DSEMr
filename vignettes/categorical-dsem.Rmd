@@ -1,8 +1,8 @@
 ---
-title: "Binary and ordinal categorical DSEM and dynamic IRT"
+title: "Binary, ordinal, and Tobit censored DSEM"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Binary and ordinal categorical DSEM and dynamic IRT}
+  %\VignetteIndexEntry{Binary, ordinal, and Tobit censored DSEM}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
@@ -12,9 +12,11 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 ```
 
 `DSEMr` supports binary and ordinal outcomes and dynamic IRT indicators via
-latent-response probit data augmentation with Mplus-compatible threshold sign
-conventions (`u$1 = -nu`), supporting both observed categorical autoregression
-and single- or two-level dynamic IRT (Mplus Examples 6.27 and 9.35).
+Albert-Chib latent-response probit data augmentation (threshold parameterization
+`u$1 = -nu`), as well as continuous floor-, ceiling-, and interval-censored
+outcomes via Bayesian Tobit data augmentation.
+
+## Binary probit AR(1)
 
 ```{r}
 library(DSEMr)
@@ -28,6 +30,23 @@ fit_bin <- dsem(m_bin, dat_bin, chains = 2, iter = 300, warmup = 150, seed = 627
 coef(fit_bin)
 ```
 
+## Tobit floor-censored AR(1)
+
+Many intensive longitudinal measures (e.g., negative affect, pain, or craving)
+exhibit substantial floor effects at zero. Declaring `censored = list(y = c(0, Inf))`
+(or `CENSORED = y (b);`) activates exact truncated-normal Gibbs augmentation:
+
+```{r}
+dat_cens <- simulate_dsem(
+  n = 120, intercept = 0.2, ar = 0.5, sigma = 0.7,
+  censored = c(0, Inf), seed = 701
+)
+m_cens <- dsem_model("y ~ lag(y, 1)", time = "time", censored = list(y = c(0, Inf)))
+fit_cens <- dsem(m_cens, dat_cens, chains = 2, iter = 300, warmup = 150, seed = 702)
+coef(fit_cens)
+dsem_dic(fit_cens)
+```
+
 Dynamic binary IRT with fixed factor innovation variance (`f@1`) and free item
-loadings compiles directly from Mplus syntax (`VARIABLE: CATEGORICAL = u1-u4;`)
-or `lavaan` syntax with `categorical = c("u1", "u2", "u3", "u4")`.
+loadings compiles directly from either `lavaan` syntax (`categorical = c("u1", "u2", "u3", "u4")`)
+or section-based script syntax (`VARIABLE: CATEGORICAL = u1-u4;`).

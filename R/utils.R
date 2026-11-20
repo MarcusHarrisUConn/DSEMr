@@ -226,3 +226,154 @@
   mapped <- match(vec, obs) - 1L
   list(values = as.double(mapped), k = length(obs))
 }
+
+.dsem_safe_fit_metrics <- function(dic_val, pd_val, d_bar_val = NA_real_, type = NULL) {
+  dic_ok <- is.numeric(dic_val) && length(dic_val) == 1L && is.finite(dic_val)
+  pd_ok <- is.numeric(pd_val) && length(pd_val) == 1L && is.finite(pd_val)
+  d_bar_ok <- is.numeric(d_bar_val) && length(d_bar_val) == 1L && is.finite(d_bar_val)
+  dic_out <- if (dic_ok) as.double(dic_val) else NA_real_
+  pd_out <- if (pd_ok) as.double(pd_val) else NA_real_
+  d_bar_out <- if (d_bar_ok) {
+    as.double(d_bar_val)
+  } else if (dic_ok && pd_ok) {
+    as.double(dic_val - pd_val)
+  } else {
+    NA_real_
+  }
+  ll_out <- if (is.finite(d_bar_out)) -0.5 * d_bar_out else NA_real_
+  out <- list(log_lik = ll_out, dic = dic_out, pd = pd_out, d_bar = d_bar_out)
+  if (!is.null(type)) out$type <- type
+  out
+}
+
+.dsem_active_regs <- function(terms, meta = NULL, level = "within") {
+  idx <- which(terms$op == "~" & terms$rhs != "1" & terms$level == level)
+  if (!length(idx)) return(terms[idx, , drop = FALSE])
+  if (!is.null(meta) && nrow(meta) == nrow(terms)) {
+    fixed_zero <- !meta$is_free[idx] & !is.na(meta$fixed_value[idx]) & abs(meta$fixed_value[idx]) < 1e-12
+    idx <- idx[!fixed_zero]
+  }
+  terms[idx, , drop = FALSE]
+}
+
+.dsem_build_exog_specs <- function(regs, outcomes) {
+  ex_rows <- regs[!regs$rhs %in% outcomes, , drop = FALSE]
+  if (!nrow(ex_rows)) {
+    return(data.frame(var = character(), lag = integer(), key = character(), stringsAsFactors = FALSE))
+  }
+  keys <- ifelse(ex_rows$lag > 0L, paste0("lag", ex_rows$lag, "_", ex_rows$rhs), ex_rows$rhs)
+  keep <- !duplicated(keys)
+  data.frame(
+    var = ex_rows$rhs[keep],
+    lag = as.integer(ex_rows$lag[keep]),
+    key = keys[keep],
+    stringsAsFactors = FALSE
+  )
+}
+
+.dsem_build_exog_matrix <- function(df, exog_specs, cluster_sizes = NULL) {
+  n_obs <- nrow(df)
+  kx <- nrow(exog_specs)
+  if (kx == 0L) return(matrix(0, n_obs, 0L))
+  x_mat <- matrix(0, n_obs, kx, dimnames = list(NULL, exog_specs$key))
+  if (is.null(cluster_sizes)) cluster_sizes <- n_obs
+  for (k in seq_len(kx)) {
+    v_raw <- as.double(df[[exog_specs$var[k]]])
+    lg <- exog_specs$lag[k]
+    if (lg == 0L) {
+      x_mat[, k] <- v_raw
+    } else {
+      lagged <- rep(NA_real_, n_obs)
+      pos <- 0L
+      for (sz in cluster_sizes) {
+        if (sz > lg) {
+          src_idx <- (pos + 1L):(pos + sz - lg)
+          dst_idx <- (pos + 1L + lg):(pos + sz)
+          lagged[dst_idx] <- v_raw[src_idx]
+        }
+        # Fill boundary rows within cluster with cluster mean (never bleeding from prior cluster)
+        c_slice <- v_raw[(pos + 1L):(pos + sz)]
+        c_fill <- mean(c_slice, na.rm = TRUE)
+        if (!is.finite(c_fill)) c_fill <- 0
+        b_end <- min(lg, sz)
+        lagged[(pos + 1L):(pos + b_end)] <- c_fill
+        pos <- pos + sz
+      }
+      x_mat[, k] <- lagged
+    }
+  }
+  x_mat
+}
+
+.dsem_normalize_censored <- function(censored) {
+  if (is.null(censored) || !length(censored)) return(list())
+  if (is.character(censored)) {
+    if (anyNA(censored) || any(!nzchar(censored))) {
+      .dsem_abort("`censored` variable names must be non-empty character strings.")
+    }
+    out <- as.list(rep("below", length(censored)))
+    names(out) <- censored
+    return(out)
+  }
+  if (!is.list(censored) || is.null(names(censored)) || any(!nzchar(names(censored)))) {
+    .dsem_abort("`censored` must be NULL, a character vector of outcome names, or a named list of bounds/directions.")
+  }
+  out <- list()
+  for (nm in names(censored)) {
+    spec <- censored[[nm]]
+    if (is.character(spec) && length(spec) == 1L) {
+      dir <- tolower(trimws(spec))
+      if (!dir %in% c("below", "left", "b", "above", "right", "a", "both", "interval", "ab")) {
+        .dsem_abort("Unsupported censoring direction `%s` for `%s`.", spec, nm)
+      }
+      out[[nm]] <- if (dir %in% c("below", "left", "b")) "below" else if (dir %in% c("above", "right", "a")) "above" else "both"
+    } else if (is.numeric(spec) && length(spec) == 2L && !anyNA(spec) && spec[1L] < spec[2L]) {
+      out[[nm]] <- as.double(spec)
+    } else {
+      .dsem_abort("Censoring specification for `%s` must be \"below\", \"above\", \"both\", or a numeric vector c(lower, upper).", nm)
+    }
+  }
+  out
+}
+
+.dsem_resolve_censoring <- function(censored, y_mat, outcomes, outcome_types) {
+  d <- length(outcomes)
+  lo <- rep(-Inf, d)
+  hi <- rep(Inf, d)
+  if (!length(censored)) return(list(outcome_types = outcome_types, lo = lo, hi = hi))
+  for (j in seq_len(d)) {
+    nm <- outcomes[j]
+    if (!nm %in% names(censored)) next
+    if (outcome_types[j] >= 2L) {
+      .dsem_abort("Outcome `%s` cannot be both categorical and censored.", nm)
+    }
+    spec <- censored[[nm]]
+    obs <- y_mat[, j]
+    obs <- obs[is.finite(obs)]
+    if (!length(obs)) .dsem_abort("Censored outcome `%s` has no finite observations.", nm)
+    if (is.character(spec)) {
+      if (identical(spec, "below")) {
+        outcome_types[j] <- -1L
+        lo[j] <- min(obs)
+      } else if (identical(spec, "above")) {
+        outcome_types[j] <- -2L
+        hi[j] <- max(obs)
+      } else {
+        outcome_types[j] <- -3L
+        lo[j] <- min(obs)
+        hi[j] <- max(obs)
+      }
+    } else {
+      has_lo <- is.finite(spec[1L])
+      has_hi <- is.finite(spec[2L])
+      if (has_lo && has_hi) {
+        outcome_types[j] <- -3L; lo[j] <- spec[1L]; hi[j] <- spec[2L]
+      } else if (has_lo) {
+        outcome_types[j] <- -1L; lo[j] <- spec[1L]
+      } else if (has_hi) {
+        outcome_types[j] <- -2L; hi[j] <- spec[2L]
+      }
+    }
+  }
+  list(outcome_types = as.integer(outcome_types), lo = as.double(lo), hi = as.double(hi))
+}

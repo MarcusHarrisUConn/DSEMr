@@ -1,8 +1,8 @@
 ---
-title: "Migrating Mplus Version 8 and Version 9 DSEM syntax"
+title: "Section-based SEM and Mplus script interoperability"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Migrating Mplus Version 8 and Version 9 DSEM syntax}
+  %\VignetteIndexEntry{Section-based SEM and Mplus script interoperability}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
@@ -11,34 +11,35 @@ vignette: >
 knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 ```
 
-`DSEMr` provides a clean-room compatibility parser for Mplus Version 8 and
-Version 9 DSEM specifications, translating `VARIABLE`, `DEFINE`, `ANALYSIS`,
-and `MODEL` sections into the exact same canonical intermediate representation
-as `lavaan`-extended DSEM syntax.
+`DSEMr` supports both extended `lavaan` formulas and section-based SEM/Mplus
+model scripts, compiling `VARIABLE`, `DEFINE`, `ANALYSIS`, and `MODEL` sections
+into the exact same canonical intermediate representation.
 
-Supported Mplus constructs include:
+Supported script constructs include:
 
-- `TYPE = TWOLEVEL RANDOM`, `TYPE = THREELEVEL RANDOM` (Version 9 DSEM3), and
+- `TYPE = TWOLEVEL RANDOM`, `TYPE = THREELEVEL RANDOM` (DSEM3), and
   `TYPE = CROSSCLASSIFIED RANDOM`
-- `TINTERVAL = time(delta)`, `LAGGED = y(1)`, `CATEGORICAL = u1-u4`
-- `DEFINE: CENTER x (GROUPMEAN | GRANDMEAN);`
+- `TINTERVAL = time(delta)`, `LAGGED = y(1) x(1)`, `CATEGORICAL = u1-u4`,
+  and `CENSORED = y (b)` / `(a)`
+- `DEFINE: CENTER x (GROUPMEAN [cluster] | GRANDMEAN);`
 - Named random slopes (`s | y ON y&1;`), random log residual variances
-  (`logv | y;`), residual dynamics (`y^ ON y^1;`), dynamic CFA/IRT (`BY` with
-  `(&1)`, `*`, `@value`, and cross-level equality `(1-4)`), and `PRIOR = PSEM`
+  (`logv | y;`), sparse fixed-zero lags (`y ON y&1@0 y&2;`), residual dynamics
+  (`y^ ON y^1;`), dynamic CFA/IRT (`BY` with `(&1)`, `*`, `@value`, and
+  cross-level equality `(1-4)`), and `PRIOR = PSEM`
 
 ```{r}
 library(DSEMr)
 
 lavaan_model <- dsem_model("y ~ lag(y, 1)", time = "time")
-mplus_model <- mplus_to_dsem("
+script_model <- mplus_to_dsem("
   ANALYSIS: TYPE = BAYES;
   MODEL:
     %WITHIN%
     y ON y&1;
 ", time = "time")
-identical(lavaan_model$terms, mplus_model$terms)
+identical(lavaan_model$terms, script_model$terms)
 
-# Mplus Version 9 three-level DSEM compilation
+# Three-level DSEM compilation
 m3 <- mplus_to_dsem("
   VARIABLE: CLUSTER = clinic patient;
   ANALYSIS: TYPE = THREELEVEL RANDOM; ESTIMATOR = BAYES;

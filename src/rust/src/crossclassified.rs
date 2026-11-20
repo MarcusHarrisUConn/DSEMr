@@ -1,4 +1,4 @@
-use crate::linalg::{eye, idx, mat_t_mul, quad_form, rinv_wishart, rmvnorm_precision, spd_invert};
+use crate::linalg::{eye, idx, mat_t_mul, rinv_wishart, rmvnorm_precision, spd_invert};
 use crate::rng::Rng;
 use std::f64::consts::PI;
 
@@ -6,26 +6,33 @@ pub struct CrossClassifiedOutput {
     pub draws: Vec<f64>,
     pub param_count: usize,
     pub id_draws: Vec<f64>,   // n_keep x n_id x q_id
-    pub time_draws: Vec<f64>, // n_keep x n_time x d
+    pub time_draws: Vec<f64>, // n_keep x n_time x q_time
+    pub q_id: usize,
+    pub q_time: usize,
     pub fitted_mean: Vec<f64>,
     pub dic: f64,
     pub pd: f64,
 }
 
-/// Mplus 9.38-9.40 Cross-Classified DSEM (Subject x Time two-way random effects + within dynamics).
+/// Cross-Classified DSEM (Subject x Time two-way random intercepts, selective random slopes
+/// across subjects and/or occasions, subject- and time-level predictors, and subject random logv
+/// via Newton-Laplace Independence MH).
 #[allow(clippy::too_many_arguments)]
 pub fn mcmc_crossclassified(
-    y_grid: &[f64], // (n_id * n_time) x d, ordered by id g=0..n_id, t=0..n_time
-    x_grid: &[f64], // (n_id * n_time) x kx
-    w_id: &[f64],   // n_id x kw
+    y_grid: &[f64],          // (n_id * n_time) x d, ordered by id g=0..n_id, t=0..n_time
+    x_grid: &[f64],          // (n_id * n_time) x kx
+    w_id: &[f64],            // n_id x kw_id
+    w_time: &[f64],          // n_time x kw_time
+    slope_rand_id: &[i32],   // d * n_sl
+    slope_rand_time: &[i32], // d * n_sl
+    has_random_logv: &[i32], // d
     n_id: usize,
     n_time: usize,
     d: usize,
     kx: usize,
-    kw: usize,
+    kw_id: usize,
+    kw_time: usize,
     lags: &[usize],
-    has_random_slopes: bool,
-    has_random_logv: bool,
     prior_mode: i32,
     beta_sd: f64,
     iter: usize,
@@ -38,10 +45,48 @@ pub fn mcmc_crossclassified(
     let max_lag = lags.iter().copied().max().unwrap_or(1).max(1);
     let n_lags = lags.len();
     let n_sl = n_lags * d + kx;
+    let n_sl_tot = d * n_sl;
 
-    let n_rs = if has_random_slopes { d * n_sl } else { 0 };
-    let n_lv = if has_random_logv { d } else { 0 };
-    let q_id = d + n_rs + n_lv;
+    // Map per-slope random indices for subject (id), occasion (time), and fixed slopes
+    let mut sl_id_idx = vec![-1i32; n_sl_tot];
+    let mut sl_time_idx = vec![-1i32; n_sl_tot];
+    let mut sl_fixed_idx = vec![-1i32; n_sl_tot];
+    let mut n_rs_id = 0usize;
+    let mut n_rs_time = 0usize;
+    let mut n_fixed_sl = 0usize;
+    for flat in 0..n_sl_tot {
+        let r_id = slope_rand_id.get(flat).copied().unwrap_or(0) != 0;
+        let r_tm = slope_rand_time.get(flat).copied().unwrap_or(0) != 0;
+        if r_id {
+            sl_id_idx[flat] = (d + n_rs_id) as i32;
+            n_rs_id += 1;
+        }
+        if r_tm {
+            sl_time_idx[flat] = (d + n_rs_time) as i32;
+            n_rs_time += 1;
+        }
+        if !r_id {
+            // Slopes without a subject random mean hold their grand mean in fixed_slopes
+            sl_fixed_idx[flat] = n_fixed_sl as i32;
+            n_fixed_sl += 1;
+        }
+    }
+
+    let mut lv_id_idx = vec![-1i32; d];
+    let mut n_lv = 0usize;
+    let mut n_fixed_sig = 0usize;
+    for (j, lv_slot) in lv_id_idx.iter_mut().enumerate().take(d) {
+        if has_random_logv.get(j).copied().unwrap_or(0) != 0 {
+            *lv_slot = (d + n_rs_id + n_lv) as i32;
+            n_lv += 1;
+        } else {
+            n_fixed_sig += 1;
+        }
+    }
+
+    let q_id = d + n_rs_id + n_lv;
+    let q_time = d + n_rs_time;
+    let q_lin_id = d + n_rs_id;
 
     let mut y_work = y_grid.to_vec();
     let mut miss_y = vec![false; n_obs * d];
@@ -66,28 +111,30 @@ pub fn mcmc_crossclassified(
     }
 
     let mut gamma0 = vec![0.0; q_id];
+    let mut fixed_slopes = vec![0.0; n_fixed_sl];
     for j in 0..d {
         gamma0[j] = (0..n_obs).map(|r| y_work[idx(r, j, n_obs)]).sum::<f64>() / n_obs as f64;
-        if has_random_slopes && n_lags >= 1 {
-            gamma0[d + j * n_sl + j] = 0.25;
+        if n_lags >= 1 {
+            let self_flat = j * n_sl + j;
+            if sl_id_idx[self_flat] >= 0 {
+                gamma0[sl_id_idx[self_flat] as usize] = 0.25;
+            } else if sl_fixed_idx[self_flat] >= 0 {
+                fixed_slopes[sl_fixed_idx[self_flat] as usize] = 0.25;
+            }
         }
     }
-    let mut gamma_w = vec![0.0; kw * q_id];
+    let mut gamma_w_id = vec![0.0; kw_id * q_id];
+    let mut gamma_w_time = vec![0.0; kw_time * q_time];
     let mut u_id = vec![0.0; n_id * q_id]; // centered subject deviations
-    let mut v_time = vec![0.0; n_time * d]; // zero-mean time shocks
-    let mut fixed_slopes = vec![0.0; if has_random_slopes { 0 } else { d * n_sl }];
-    if !has_random_slopes && n_lags >= 1 {
-        for j in 0..d {
-            fixed_slopes[j * n_sl + j] = 0.25;
-        }
-    }
-    let mut fixed_sigma2: Vec<f64> = vec![1.0_f64; if has_random_logv { 0 } else { d }];
+    let mut v_time = vec![0.0; n_time * q_time]; // centered occasion deviations
+    let mut fixed_sigma2 = vec![1.0_f64; d];
     let mut omega_id = eye(q_id, 0.1);
-    let mut omega_time = eye(d, 0.1);
+    let mut omega_time = eye(q_time, 0.1);
 
     let n_om_id = q_id * (q_id + 1) / 2;
-    let n_om_t = d * (d + 1) / 2;
-    let n_params = q_id + q_id * kw + fixed_slopes.len() + n_om_id + n_om_t + fixed_sigma2.len();
+    let n_om_t = q_time * (q_time + 1) / 2;
+    let n_params =
+        q_id + q_id * kw_id + q_time * kw_time + n_fixed_sl + n_om_id + n_om_t + n_fixed_sig;
 
     let keep_indices: Vec<usize> = ((warmup + 1)..=iter)
         .filter(|i| (i - warmup - 1) % thin == 0)
@@ -95,41 +142,118 @@ pub fn mcmc_crossclassified(
     let n_keep = keep_indices.len();
     let mut draws = vec![0.0; n_keep * n_params];
     let mut id_draws = vec![0.0; n_keep * n_id * q_id];
-    let mut time_draws = vec![0.0; n_keep * n_time * d];
+    let mut time_draws = vec![0.0; n_keep * n_time * q_time];
     let mut fitted_accum = vec![0.0; n_obs * d];
     let mut sig_accum = vec![0.0; n_id * d];
     let mut deviance_sum = 0.0;
     let mut keep_pos = 0usize;
 
+    // Precompute index list of time-random slopes
+    let time_sl_flats: Vec<(usize, usize)> = (0..n_sl_tot)
+        .filter_map(|flat| {
+            if sl_time_idx[flat] >= 0 {
+                Some((flat, sl_time_idx[flat] as usize))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let id_sl_flats: Vec<(usize, usize)> = (0..n_sl_tot)
+        .filter_map(|flat| {
+            if sl_id_idx[flat] >= 0 {
+                Some((flat, sl_id_idx[flat] as usize))
+            } else {
+                None
+            }
+        })
+        .collect();
+
     for step in 1..=iter {
         let om_id_inv = spd_invert(&omega_id, q_id);
-        let om_t_inv = spd_invert(&omega_time, d);
+        let om_t_inv = spd_invert(&omega_time, q_time);
 
-        let build_th = |g: usize, g0: &[f64], gw: &[f64], uid: &[f64]| -> Vec<f64> {
+        let build_th_id = |g: usize, g0: &[f64], gw: &[f64], uid: &[f64]| -> Vec<f64> {
             let mut th = g0.to_vec();
             for q in 0..q_id {
-                for k in 0..kw {
-                    th[q] += gw[idx(k, q, kw)] * w_id[idx(g, k, n_id)];
+                for k in 0..kw_id {
+                    th[q] += gw[idx(k, q, kw_id)] * w_id[idx(g, k, n_id)];
                 }
                 th[q] += uid[idx(g, q, n_id)];
             }
             th
         };
 
+        let build_vt_tot = |t: usize, gwt: &[f64], vt: &[f64]| -> Vec<f64> {
+            let mut out = vec![0.0; q_time];
+            for q in 0..q_time {
+                let mut v = vt[idx(t, q, n_time)];
+                for k in 0..kw_time {
+                    v += gwt[idx(k, q, kw_time)] * w_time[idx(t, k, n_time)];
+                }
+                out[q] = v;
+            }
+            out
+        };
+
+        // Precompute full occasion effects v_tot[t, 0..q_time] for fast lookup during subject updates
+        let mut vt_tot = vec![0.0; n_time * q_time];
+        for t in 0..n_time {
+            let v_t = build_vt_tot(t, &gamma_w_time, &v_time);
+            for q in 0..q_time {
+                vt_tot[idx(t, q, n_time)] = v_t[q];
+            }
+        }
+
+        let cell_slope =
+            |flat: usize, th_g: &[f64], t: usize, vt_all: &[f64], f_sl: &[f64]| -> f64 {
+                let mut s = if sl_id_idx[flat] >= 0 {
+                    th_g[sl_id_idx[flat] as usize]
+                } else {
+                    f_sl[sl_fixed_idx[flat] as usize]
+                };
+                if sl_time_idx[flat] >= 0 {
+                    s += vt_all[idx(t, sl_time_idx[flat] as usize, n_time)];
+                }
+                s
+            };
+
+        let cell_mean = |y_w: &[f64],
+                         st: usize,
+                         t: usize,
+                         j: usize,
+                         th_g: &[f64],
+                         vt_all: &[f64],
+                         f_sl: &[f64]|
+         -> f64 {
+            let mut pr = th_g[j] + vt_all[idx(t, j, n_time)];
+            for k in 0..kx {
+                let flat = j * n_sl + n_lags * d + k;
+                pr += cell_slope(flat, th_g, t, vt_all, f_sl) * x_grid[idx(st + t, k, n_obs)];
+            }
+            if t < max_lag {
+                return pr;
+            }
+            for (li, &lv) in lags.iter().enumerate() {
+                for mc in 0..d {
+                    let flat = j * n_sl + li * d + mc;
+                    let phi = cell_slope(flat, th_g, t, vt_all, f_sl);
+                    let dev = y_w[idx(st + t - lv, mc, n_obs)]
+                        - th_g[mc]
+                        - vt_all[idx(t - lv, mc, n_time)];
+                    pr += phi * dev;
+                }
+            }
+            pr
+        };
+
         // 1. Impute missing cells & update subject random effects u_id[g, .]
-        let q_lin = d + n_rs;
         for g in 0..n_id {
             let st = g * n_time;
-            let th_cur = build_th(g, &gamma0, &gamma_w, &u_id);
-            let slopes_g: Vec<f64> = if has_random_slopes {
-                th_cur[d..(d + n_rs)].to_vec()
-            } else {
-                fixed_slopes.clone()
-            };
+            let th_cur = build_th_id(g, &gamma0, &gamma_w_id, &u_id);
             let sig2_g: Vec<f64> = (0..d)
                 .map(|j| {
-                    if has_random_logv {
-                        th_cur[d + n_rs + j].clamp(-10.0, 10.0).exp()
+                    if lv_id_idx[j] >= 0 {
+                        th_cur[lv_id_idx[j] as usize].clamp(-10.0, 10.0).exp()
                     } else {
                         fixed_sigma2[j].max(1e-6)
                     }
@@ -140,16 +264,13 @@ pub fn mcmc_crossclassified(
                 let r_abs = st + t;
                 for j in 0..d {
                     if miss_y[idx(r_abs, j, n_obs)] {
-                        let fv = cc_cell_mean(
-                            &y_work, x_grid, &v_time, st, t, j, d, kx, lags, max_lag, &th_cur,
-                            &slopes_g, n_time, n_obs,
-                        );
+                        let fv = cell_mean(&y_work, st, t, j, &th_cur, &vt_tot, &fixed_slopes);
                         y_work[idx(r_abs, j, n_obs)] = fv + sig2_g[j].sqrt() * rng.rnorm();
                     }
                 }
             }
 
-            // Update u_id[g, 0..d] (subject intercepts)
+            // 1a. Update subject intercepts u_id[g, 0..d]
             {
                 let mut pr = vec![0.0; d * d];
                 let mut inf = vec![0.0; d];
@@ -164,32 +285,32 @@ pub fn mcmc_crossclassified(
                 let mut base_mu = vec![0.0; d];
                 for j in 0..d {
                     base_mu[j] = gamma0[j];
-                    for k in 0..kw {
-                        base_mu[j] += gamma_w[idx(k, j, kw)] * w_id[idx(g, k, n_id)];
+                    for k in 0..kw_id {
+                        base_mu[j] += gamma_w_id[idx(k, j, kw_id)] * w_id[idx(g, k, n_id)];
                     }
                 }
                 for j in 0..d {
                     let s2 = sig2_g[j];
-                    let mut cm = 1.0;
-                    for (li, _) in lags.iter().enumerate() {
-                        cm -= slopes_g[j * n_sl + li * d + j];
-                    }
                     for t in max_lag..n_time {
-                        let mut rem = y_work[idx(st + t, j, n_obs)]
-                            - v_time[idx(t, j, n_time)]
-                            - cm * base_mu[j];
+                        let mut cm = 1.0;
+                        let mut rem =
+                            y_work[idx(st + t, j, n_obs)] - vt_tot[idx(t, j, n_time)] - base_mu[j];
                         for k in 0..kx {
-                            rem -=
-                                slopes_g[j * n_sl + n_lags * d + k] * x_grid[idx(st + t, k, n_obs)];
+                            let flat = j * n_sl + n_lags * d + k;
+                            let sl = cell_slope(flat, &th_cur, t, &vt_tot, &fixed_slopes);
+                            rem -= sl * x_grid[idx(st + t, k, n_obs)];
                         }
                         for (li, &lv) in lags.iter().enumerate() {
                             for mc in 0..d {
-                                let phi = slopes_g[j * n_sl + li * d + mc];
+                                let flat = j * n_sl + li * d + mc;
+                                let phi = cell_slope(flat, &th_cur, t, &vt_tot, &fixed_slopes);
                                 let yl = y_work[idx(st + t - lv, mc, n_obs)]
-                                    - v_time[idx(t - lv, mc, n_time)];
-                                rem -= phi * yl;
-                                if mc != j {
-                                    rem += phi * (base_mu[mc] + u_id[idx(g, mc, n_id)]);
+                                    - vt_tot[idx(t - lv, mc, n_time)];
+                                if mc == j {
+                                    cm -= phi;
+                                    rem -= phi * (yl - base_mu[j]);
+                                } else {
+                                    rem -= phi * (yl - (base_mu[mc] + u_id[idx(g, mc, n_id)]));
                                 }
                             }
                         }
@@ -203,278 +324,477 @@ pub fn mcmc_crossclassified(
                 }
             }
 
-            // Update subject random slopes u_id[g, d..q_lin] if enabled
-            if has_random_slopes {
-                let mut pr = vec![0.0; n_rs * n_rs];
-                let mut inf = vec![0.0; n_rs];
-                for ca in 0..n_rs {
-                    for ra in 0..n_rs {
-                        pr[idx(ra, ca, n_rs)] = om_id_inv[idx(d + ra, d + ca, q_id)];
+            // 1b. Update subject random slopes u_id[g, d..q_lin_id]
+            if n_rs_id > 0 {
+                let mut pr = vec![0.0; n_rs_id * n_rs_id];
+                let mut inf = vec![0.0; n_rs_id];
+                for ca in 0..n_rs_id {
+                    for ra in 0..n_rs_id {
+                        pr[idx(ra, ca, n_rs_id)] = om_id_inv[idx(d + ra, d + ca, q_id)];
                     }
                     for q_o in 0..q_id {
-                        if q_o < d || q_o >= q_lin {
+                        if q_o < d || q_o >= q_lin_id {
                             inf[ca] -= om_id_inv[idx(d + ca, q_o, q_id)] * u_id[idx(g, q_o, n_id)];
                         }
                     }
                 }
-                let th_now = build_th(g, &gamma0, &gamma_w, &u_id);
-                let mut base_sl = vec![0.0; n_rs];
-                for s in 0..n_rs {
-                    base_sl[s] = gamma0[d + s];
-                    for k in 0..kw {
-                        base_sl[s] += gamma_w[idx(k, d + s, kw)] * w_id[idx(g, k, n_id)];
-                    }
-                }
+                let th_now = build_th_id(g, &gamma0, &gamma_w_id, &u_id);
+                let mut rv = vec![0.0; n_sl];
                 for j in 0..d {
                     let s2 = sig2_g[j];
                     for t in max_lag..n_time {
                         let mut y_dev =
-                            y_work[idx(st + t, j, n_obs)] - th_now[j] - v_time[idx(t, j, n_time)];
-                        let mut rv = vec![0.0; n_sl];
+                            y_work[idx(st + t, j, n_obs)] - th_now[j] - vt_tot[idx(t, j, n_time)];
                         for (li, &lv) in lags.iter().enumerate() {
                             for mc in 0..d {
                                 rv[li * d + mc] = y_work[idx(st + t - lv, mc, n_obs)]
                                     - th_now[mc]
-                                    - v_time[idx(t - lv, mc, n_time)];
+                                    - vt_tot[idx(t - lv, mc, n_time)];
                             }
                         }
                         for k in 0..kx {
                             rv[n_lags * d + k] = x_grid[idx(st + t, k, n_obs)];
                         }
-                        for s in 0..n_sl {
-                            y_dev -= base_sl[j * n_sl + s] * rv[s];
+                        let mut active: Vec<(usize, f64)> = Vec::new();
+                        for (s, &rv_s) in rv.iter().enumerate().take(n_sl) {
+                            let flat = j * n_sl + s;
+                            let sl_full = cell_slope(flat, &th_now, t, &vt_tot, &fixed_slopes);
+                            if sl_id_idx[flat] >= 0 {
+                                let q_s = sl_id_idx[flat] as usize;
+                                let u_cur = u_id[idx(g, q_s, n_id)];
+                                y_dev -= (sl_full - u_cur) * rv_s;
+                                active.push((q_s - d, rv_s));
+                            } else {
+                                y_dev -= sl_full * rv_s;
+                            }
                         }
-                        for a in 0..n_sl {
-                            let ga = j * n_sl + a;
-                            inf[ga] += rv[a] * y_dev / s2;
-                            for b in 0..n_sl {
-                                let gb = j * n_sl + b;
-                                pr[idx(ga, gb, n_rs)] += rv[a] * rv[b] / s2;
+                        for &(ra, xa) in &active {
+                            inf[ra] += xa * y_dev / s2;
+                            for &(cb, xb) in &active {
+                                pr[idx(ra, cb, n_rs_id)] += xa * xb / s2;
                             }
                         }
                     }
                 }
-                let u_sl = rmvnorm_precision(&mut rng, &pr, &inf, n_rs);
-                for s in 0..n_rs {
+                let u_sl = rmvnorm_precision(&mut rng, &pr, &inf, n_rs_id);
+                for s in 0..n_rs_id {
                     u_id[idx(g, d + s, n_id)] = u_sl[s];
                 }
             }
 
-            // Update subject random log-variances via MH
-            if has_random_logv {
-                let th_now = build_th(g, &gamma0, &gamma_w, &u_id);
-                let sl_now = if has_random_slopes {
-                    th_now[d..(d + n_rs)].to_vec()
-                } else {
-                    fixed_slopes.clone()
-                };
+            // 1c. Update subject random log-variances via strictly-concave Newton-Laplace Independence MH
+            if n_lv > 0 {
+                let th_now = build_th_id(g, &gamma0, &gamma_w_id, &u_id);
                 for j in 0..d {
-                    let q_lv = d + n_rs + j;
-                    let cur_u = u_id[idx(g, q_lv, n_id)];
-                    let prop_u = (cur_u + 0.22 * rng.rnorm()).clamp(-8.0, 8.0);
+                    if lv_id_idx[j] < 0 {
+                        continue;
+                    }
+                    let q_lv = lv_id_idx[j] as usize;
+                    let mut cur_u = u_id[idx(g, q_lv, n_id)];
                     let base_lv = th_now[q_lv] - cur_u;
                     let mut rss = 0.0;
                     for t in max_lag..n_time {
-                        let fv = cc_cell_mean(
-                            &y_work, x_grid, &v_time, st, t, j, d, kx, lags, max_lag, &th_now,
-                            &sl_now, n_time, n_obs,
-                        );
+                        let fv = cell_mean(&y_work, st, t, j, &th_now, &vt_tot, &fixed_slopes);
                         let e = y_work[idx(st + t, j, n_obs)] - fv;
                         rss += e * e;
                     }
                     let ne = (n_time - max_lag) as f64;
-                    let lp = |uv: f64| -> f64 {
-                        let lv = base_lv + uv;
-                        let mut uv_vec: Vec<f64> =
-                            (0..q_id).map(|q| u_id[idx(g, q, n_id)]).collect();
-                        uv_vec[q_lv] = uv;
-                        -0.5 * ne * lv
-                            - 0.5 * (-lv).exp() * rss
-                            - 0.5 * quad_form(&uv_vec, &om_id_inv, q_id)
-                    };
-                    if rng.runif().ln() < lp(prop_u) - lp(cur_u) {
-                        u_id[idx(g, q_lv, n_id)] = prop_u;
+                    let p_tot = om_id_inv[idx(q_lv, q_lv, q_id)].max(1e-8);
+                    let mut info_tot = 0.0;
+                    for q_o in 0..q_id {
+                        if q_o != q_lv {
+                            info_tot -= om_id_inv[idx(q_lv, q_o, q_id)] * u_id[idx(g, q_o, n_id)];
+                        }
                     }
+                    let m_prior = (info_tot / p_tot).clamp(-8.0, 8.0);
+                    let mut u_mode = m_prior;
+                    for _ in 0..6 {
+                        let exp_m = (-(base_lv + u_mode)).exp().min(1e12);
+                        let g1 = -0.5 * ne + 0.5 * exp_m * rss - p_tot * (u_mode - m_prior);
+                        let neg_g2 = (0.5 * exp_m * rss + p_tot).max(1e-6);
+                        let delta = (g1 / neg_g2).clamp(-2.0, 2.0);
+                        u_mode = (u_mode + delta).clamp(-8.0, 8.0);
+                        if delta.abs() < 1e-6 {
+                            break;
+                        }
+                    }
+                    let hess =
+                        (0.5 * (-(base_lv + u_mode)).exp().min(1e12) * rss + p_tot).max(1e-6);
+                    let prop_sd = (1.25 / hess.sqrt()).clamp(0.01, 2.5);
+                    let lp_fn = |uv: f64| -> f64 {
+                        let lv = base_lv + uv;
+                        -0.5 * ne * lv
+                            - 0.5 * (-lv).exp().min(1e12) * rss
+                            - 0.5 * p_tot * (uv - m_prior) * (uv - m_prior)
+                    };
+                    let logq = |uv: f64| -> f64 {
+                        let z = (uv - u_mode) / prop_sd;
+                        -0.5 * z * z
+                    };
+                    for _ in 0..2 {
+                        let prop_u = (u_mode + prop_sd * rng.rnorm()).clamp(-8.0, 8.0);
+                        let log_acc = (lp_fn(prop_u) - logq(prop_u)) - (lp_fn(cur_u) - logq(cur_u));
+                        if rng.runif().ln() < log_acc {
+                            cur_u = prop_u;
+                        }
+                    }
+                    u_id[idx(g, q_lv, n_id)] = cur_u;
                 }
             }
         }
 
-        // 2. Update occasion random effects v_time[t, 0..d] sequentially across t = 0..n_time
+        // Precompute updated th_id for all subjects
+        let th_all: Vec<Vec<f64>> = (0..n_id)
+            .map(|g| build_th_id(g, &gamma0, &gamma_w_id, &u_id))
+            .collect();
+
+        // 2. Update occasion random effects v_time[t, 0..q_time]
+        //    2a. Occasion intercepts v_time[t, 0..d]
         for t in 0..n_time {
-            let mut pr = om_t_inv.clone();
+            let mut pr = vec![0.0; d * d];
             let mut inf = vec![0.0; d];
-            for g in 0..n_id {
+            for ca in 0..d {
+                for ra in 0..d {
+                    pr[idx(ra, ca, d)] = om_t_inv[idx(ra, ca, q_time)];
+                }
+                for q_o in d..q_time {
+                    inf[ca] -= om_t_inv[idx(ca, q_o, q_time)] * v_time[idx(t, q_o, n_time)];
+                }
+            }
+            for (g, th_g) in th_all.iter().enumerate().take(n_id) {
                 let st = g * n_time;
-                let th_g = build_th(g, &gamma0, &gamma_w, &u_id);
-                let sl_g: Vec<f64> = if has_random_slopes {
-                    th_g[d..(d + n_rs)].to_vec()
-                } else {
-                    fixed_slopes.clone()
-                };
                 for j in 0..d {
-                    let s2 = if has_random_logv {
-                        th_g[d + n_rs + j].clamp(-10.0, 10.0).exp()
+                    let s2 = if lv_id_idx[j] >= 0 {
+                        th_g[lv_id_idx[j] as usize].clamp(-10.0, 10.0).exp()
                     } else {
                         fixed_sigma2[j].max(1e-6)
                     };
                     if t >= max_lag {
-                        let mut fv_no_vt = cc_cell_mean(
-                            &y_work, x_grid, &v_time, st, t, j, d, kx, lags, max_lag, &th_g, &sl_g,
-                            n_time, n_obs,
-                        );
-                        fv_no_vt -= v_time[idx(t, j, n_time)];
+                        let fv_cur = cell_mean(&y_work, st, t, j, th_g, &vt_tot, &fixed_slopes);
+                        let fv_no_vt = fv_cur - v_time[idx(t, j, n_time)];
                         let r = y_work[idx(st + t, j, n_obs)] - fv_no_vt;
                         pr[idx(j, j, d)] += 1.0 / s2;
                         inf[j] += r / s2;
                     } else {
-                        let r = y_work[idx(st + t, j, n_obs)] - th_g[j];
+                        let mut base_t = th_g[j];
+                        for k in 0..kw_time {
+                            base_t += gamma_w_time[idx(k, j, kw_time)] * w_time[idx(t, k, n_time)];
+                        }
+                        let r = y_work[idx(st + t, j, n_obs)] - base_t;
                         pr[idx(j, j, d)] += 1.0 / s2;
                         inf[j] += r / s2;
                     }
-                    // Future lag appearances of v_time[t, j] (since y^{(w)}_{it} = y_{it} - mu_i - v_t)
+                    // Future lag appearances of v_time[t, j]
                     for (li, &lv) in lags.iter().enumerate() {
                         let tf = t + lv;
                         if tf >= max_lag && tf < n_time {
-                            let phi = sl_g[j * n_sl + li * d + j];
-                            // In y_{tf}, pred has + phi * (y_t - mu_i - v_t) -> derivative wrt v_t is -phi!
-                            let fv_cur = cc_cell_mean(
-                                &y_work, x_grid, &v_time, st, tf, j, d, kx, lags, max_lag, &th_g,
-                                &sl_g, n_time, n_obs,
-                            );
-                            let fv_at_zero = fv_cur + phi * v_time[idx(t, j, n_time)];
-                            let r_f = y_work[idx(st + tf, j, n_obs)] - fv_at_zero;
-                            pr[idx(j, j, d)] += (phi * phi) / s2;
-                            inf[j] += (-phi) * r_f / s2;
+                            for m_out in 0..d {
+                                let flat = m_out * n_sl + li * d + j;
+                                let phi = cell_slope(flat, th_g, tf, &vt_tot, &fixed_slopes);
+                                if phi.abs() > 1e-12 {
+                                    let s2_m = if lv_id_idx[m_out] >= 0 {
+                                        th_g[lv_id_idx[m_out] as usize].clamp(-10.0, 10.0).exp()
+                                    } else {
+                                        fixed_sigma2[m_out].max(1e-6)
+                                    };
+                                    let fv_cur = cell_mean(
+                                        &y_work,
+                                        st,
+                                        tf,
+                                        m_out,
+                                        th_g,
+                                        &vt_tot,
+                                        &fixed_slopes,
+                                    );
+                                    let fv_at_zero = fv_cur + phi * v_time[idx(t, j, n_time)];
+                                    let r_f = y_work[idx(st + tf, m_out, n_obs)] - fv_at_zero;
+                                    pr[idx(j, j, d)] += (phi * phi) / s2_m;
+                                    inf[j] += (-phi) * r_f / s2_m;
+                                }
+                            }
                         }
                     }
                 }
             }
             let vt = rmvnorm_precision(&mut rng, &pr, &inf, d);
             for j in 0..d {
+                let delta = vt[j] - v_time[idx(t, j, n_time)];
                 v_time[idx(t, j, n_time)] = vt[j];
+                vt_tot[idx(t, j, n_time)] += delta;
             }
         }
-        // Center v_time to identify grand intercept mu
+
+        //    2b. Occasion-varying random slopes v_time[t, d..q_time]
+        if n_rs_time > 0 {
+            let mut rv = vec![0.0; n_sl];
+            for t in max_lag..n_time {
+                let mut pr = vec![0.0; n_rs_time * n_rs_time];
+                let mut inf = vec![0.0; n_rs_time];
+                for ca in 0..n_rs_time {
+                    for ra in 0..n_rs_time {
+                        pr[idx(ra, ca, n_rs_time)] = om_t_inv[idx(d + ra, d + ca, q_time)];
+                    }
+                    for j in 0..d {
+                        inf[ca] -= om_t_inv[idx(d + ca, j, q_time)] * v_time[idx(t, j, n_time)];
+                    }
+                }
+                for (g, th_g) in th_all.iter().enumerate().take(n_id) {
+                    let st = g * n_time;
+                    for (li, &lv) in lags.iter().enumerate() {
+                        for mc in 0..d {
+                            rv[li * d + mc] = y_work[idx(st + t - lv, mc, n_obs)]
+                                - th_g[mc]
+                                - vt_tot[idx(t - lv, mc, n_time)];
+                        }
+                    }
+                    for k in 0..kx {
+                        rv[n_lags * d + k] = x_grid[idx(st + t, k, n_obs)];
+                    }
+                    for j in 0..d {
+                        let s2 = if lv_id_idx[j] >= 0 {
+                            th_g[lv_id_idx[j] as usize].clamp(-10.0, 10.0).exp()
+                        } else {
+                            fixed_sigma2[j].max(1e-6)
+                        };
+                        let mut y_dev =
+                            y_work[idx(st + t, j, n_obs)] - th_g[j] - vt_tot[idx(t, j, n_time)];
+                        let mut active: Vec<(usize, f64)> = Vec::new();
+                        for (s, &rv_s) in rv.iter().enumerate().take(n_sl) {
+                            let flat = j * n_sl + s;
+                            let sl_full = cell_slope(flat, th_g, t, &vt_tot, &fixed_slopes);
+                            if sl_time_idx[flat] >= 0 {
+                                let q_t = sl_time_idx[flat] as usize;
+                                let v_cur = v_time[idx(t, q_t, n_time)];
+                                y_dev -= (sl_full - v_cur) * rv_s;
+                                active.push((q_t - d, rv_s));
+                            } else {
+                                y_dev -= sl_full * rv_s;
+                            }
+                        }
+                        for &(ra, xa) in &active {
+                            inf[ra] += xa * y_dev / s2;
+                            for &(cb, xb) in &active {
+                                pr[idx(ra, cb, n_rs_time)] += xa * xb / s2;
+                            }
+                        }
+                    }
+                }
+                let vt_sl = rmvnorm_precision(&mut rng, &pr, &inf, n_rs_time);
+                for s in 0..n_rs_time {
+                    let delta = vt_sl[s] - v_time[idx(t, d + s, n_time)];
+                    v_time[idx(t, d + s, n_time)] = vt_sl[s];
+                    vt_tot[idx(t, d + s, n_time)] += delta;
+                }
+            }
+        }
+
+        // Center v_time to identify grand means
         for j in 0..d {
             let mv: f64 =
                 (0..n_time).map(|t| v_time[idx(t, j, n_time)]).sum::<f64>() / n_time as f64;
             for t in 0..n_time {
                 v_time[idx(t, j, n_time)] -= mv;
+                vt_tot[idx(t, j, n_time)] -= mv;
             }
             gamma0[j] += mv;
         }
+        for &(flat, q_t) in &time_sl_flats {
+            let mv: f64 = (0..n_time)
+                .map(|t| v_time[idx(t, q_t, n_time)])
+                .sum::<f64>()
+                / n_time as f64;
+            for t in 0..n_time {
+                v_time[idx(t, q_t, n_time)] -= mv;
+                vt_tot[idx(t, q_t, n_time)] -= mv;
+            }
+            if sl_id_idx[flat] >= 0 {
+                gamma0[sl_id_idx[flat] as usize] += mv;
+            } else {
+                fixed_slopes[sl_fixed_idx[flat] as usize] += mv;
+            }
+        }
 
-        // 3. Update fixed slopes & fixed sigma2 (if not random)
+        // 3. Update fixed slopes & fixed sigma2
         let p_pr = if prior_mode == 1 {
             1e-10
         } else {
             1.0 / (beta_sd * beta_sd)
         };
-        if !has_random_slopes {
-            let nf = d * n_sl;
-            let mut pr = eye(nf, p_pr);
-            let mut inf = vec![0.0; nf];
+        if n_fixed_sl > 0 {
+            let mut pr = eye(n_fixed_sl, p_pr);
+            let mut inf = vec![0.0; n_fixed_sl];
+            let mut rv = vec![0.0; n_sl];
             for g in 0..n_id {
                 let st = g * n_time;
-                let th_g = build_th(g, &gamma0, &gamma_w, &u_id);
+                let th_g = build_th_id(g, &gamma0, &gamma_w_id, &u_id);
                 for j in 0..d {
-                    let s2 = if has_random_logv {
-                        th_g[d + j].clamp(-10.0, 10.0).exp()
+                    let s2 = if lv_id_idx[j] >= 0 {
+                        th_g[lv_id_idx[j] as usize].clamp(-10.0, 10.0).exp()
                     } else {
                         fixed_sigma2[j].max(1e-6)
                     };
                     for t in max_lag..n_time {
-                        let y_dev =
-                            y_work[idx(st + t, j, n_obs)] - th_g[j] - v_time[idx(t, j, n_time)];
-                        let mut rv = vec![0.0; n_sl];
+                        let mut y_dev =
+                            y_work[idx(st + t, j, n_obs)] - th_g[j] - vt_tot[idx(t, j, n_time)];
                         for (li, &lv) in lags.iter().enumerate() {
                             for mc in 0..d {
                                 rv[li * d + mc] = y_work[idx(st + t - lv, mc, n_obs)]
                                     - th_g[mc]
-                                    - v_time[idx(t - lv, mc, n_time)];
+                                    - vt_tot[idx(t - lv, mc, n_time)];
                             }
                         }
                         for k in 0..kx {
                             rv[n_lags * d + k] = x_grid[idx(st + t, k, n_obs)];
                         }
-                        for a in 0..n_sl {
-                            let ga = j * n_sl + a;
-                            inf[ga] += rv[a] * y_dev / s2;
-                            for b in 0..n_sl {
-                                pr[idx(ga, j * n_sl + b, nf)] += rv[a] * rv[b] / s2;
+                        let mut active: Vec<(usize, f64)> = Vec::new();
+                        for (s, &rv_s) in rv.iter().enumerate().take(n_sl) {
+                            let flat = j * n_sl + s;
+                            if sl_fixed_idx[flat] >= 0 {
+                                let fi = sl_fixed_idx[flat] as usize;
+                                // Subtract occasion random component if also time-varying
+                                if sl_time_idx[flat] >= 0 {
+                                    y_dev -=
+                                        vt_tot[idx(t, sl_time_idx[flat] as usize, n_time)] * rv_s;
+                                }
+                                active.push((fi, rv_s));
+                            } else {
+                                let sl_val = cell_slope(flat, &th_g, t, &vt_tot, &fixed_slopes);
+                                y_dev -= sl_val * rv_s;
+                            }
+                        }
+                        for &(fa, xa) in &active {
+                            inf[fa] += xa * y_dev / s2;
+                            for &(fb, xb) in &active {
+                                pr[idx(fa, fb, n_fixed_sl)] += xa * xb / s2;
                             }
                         }
                     }
                 }
             }
-            fixed_slopes = rmvnorm_precision(&mut rng, &pr, &inf, nf);
+            fixed_slopes = rmvnorm_precision(&mut rng, &pr, &inf, n_fixed_sl);
         }
-        if !has_random_logv {
-            for j in 0..d {
+
+        for j in 0..d {
+            if lv_id_idx[j] < 0 {
                 let mut rss = 0.0;
                 let mut cnt = 0usize;
                 for g in 0..n_id {
                     let st = g * n_time;
-                    let th_g = build_th(g, &gamma0, &gamma_w, &u_id);
-                    let sl_g = if has_random_slopes {
-                        th_g[d..(d + n_rs)].to_vec()
-                    } else {
-                        fixed_slopes.clone()
-                    };
+                    let th_g = build_th_id(g, &gamma0, &gamma_w_id, &u_id);
                     for t in max_lag..n_time {
-                        let fv = cc_cell_mean(
-                            &y_work, x_grid, &v_time, st, t, j, d, kx, lags, max_lag, &th_g, &sl_g,
-                            n_time, n_obs,
-                        );
+                        let fv = cell_mean(&y_work, st, t, j, &th_g, &vt_tot, &fixed_slopes);
                         let e = y_work[idx(st + t, j, n_obs)] - fv;
                         rss += e * e;
                         cnt += 1;
                     }
                 }
-                fixed_sigma2[j] = rng.rinv_gamma(0.001 + 0.5 * cnt as f64, 0.001 + 0.5 * rss);
+                let (sh, sc) = if prior_mode == 1 {
+                    ((0.5 * cnt as f64 - 1.0).max(0.5), 0.5 * rss.max(1e-8))
+                } else {
+                    (0.001 + 0.5 * cnt as f64, 0.001 + 0.5 * rss)
+                };
+                fixed_sigma2[j] = rng.rinv_gamma(sh, sc);
             }
         }
 
-        // 4. Update gamma0, gamma_w, omega_id, omega_time
-        let pw = 1 + kw;
+        // 4. Update gamma0, gamma_w_id, gamma_w_time, omega_id, omega_time (with SUR conditioning)
+        let pw_id = 1 + kw_id;
         for q in 0..q_id {
-            let vq = omega_id[idx(q, q, q_id)].max(1e-6);
-            let mut wd = vec![0.0; n_id * pw];
+            let o_qq = om_id_inv[idx(q, q, q_id)].max(1e-8);
+            let mut wd = vec![0.0; n_id * pw_id];
             let mut yv = vec![0.0; n_id];
             for g in 0..n_id {
                 wd[idx(g, 0, n_id)] = 1.0;
                 let mut tot = gamma0[q] + u_id[idx(g, q, n_id)];
-                for k in 0..kw {
+                for k in 0..kw_id {
                     wd[idx(g, 1 + k, n_id)] = w_id[idx(g, k, n_id)];
-                    tot += gamma_w[idx(k, q, kw)] * w_id[idx(g, k, n_id)];
+                    tot += gamma_w_id[idx(k, q, kw_id)] * w_id[idx(g, k, n_id)];
+                }
+                for q2 in 0..q_id {
+                    if q2 != q {
+                        let o_q2 = om_id_inv[idx(q, q2, q_id)];
+                        if o_q2.abs() > 1e-14 {
+                            tot += (o_q2 / o_qq) * u_id[idx(g, q2, n_id)];
+                        }
+                    }
                 }
                 yv[g] = tot;
             }
-            let wtw = mat_t_mul(&wd, &wd, pw, n_id, pw);
-            let wty = mat_t_mul(&wd, &yv, pw, n_id, 1);
-            let mut pr = vec![0.0; pw * pw];
-            for i in 0..(pw * pw) {
-                pr[i] = wtw[i] / vq;
+            let wtw = mat_t_mul(&wd, &wd, pw_id, n_id, pw_id);
+            let wty = mat_t_mul(&wd, &yv, pw_id, n_id, 1);
+            let mut pr = vec![0.0; pw_id * pw_id];
+            for i in 0..(pw_id * pw_id) {
+                pr[i] = wtw[i] * o_qq;
             }
-            for i in 0..pw {
-                pr[idx(i, i, pw)] += p_pr;
+            for i in 0..pw_id {
+                pr[idx(i, i, pw_id)] += p_pr;
             }
-            let inf: Vec<f64> = wty.iter().map(|v| v / vq).collect();
-            let b = rmvnorm_precision(&mut rng, &pr, &inf, pw);
+            let inf: Vec<f64> = wty.iter().map(|v| v * o_qq).collect();
+            let b = rmvnorm_precision(&mut rng, &pr, &inf, pw_id);
             let old_g0 = gamma0[q];
-            let old_gw: Vec<f64> = (0..kw).map(|k| gamma_w[idx(k, q, kw)]).collect();
+            let old_gw: Vec<f64> = (0..kw_id).map(|k| gamma_w_id[idx(k, q, kw_id)]).collect();
             gamma0[q] = b[0];
-            for k in 0..kw {
-                gamma_w[idx(k, q, kw)] = b[1 + k];
+            for k in 0..kw_id {
+                gamma_w_id[idx(k, q, kw_id)] = b[1 + k];
             }
             for g in 0..n_id {
                 let mut dl = old_g0 - gamma0[q];
-                for k in 0..kw {
-                    dl += (old_gw[k] - gamma_w[idx(k, q, kw)]) * w_id[idx(g, k, n_id)];
+                for k in 0..kw_id {
+                    dl += (old_gw[k] - gamma_w_id[idx(k, q, kw_id)]) * w_id[idx(g, k, n_id)];
                 }
                 u_id[idx(g, q, n_id)] += dl;
             }
         }
+
+        if kw_time > 0 {
+            for q in 0..q_time {
+                let o_qq = om_t_inv[idx(q, q, q_time)].max(1e-8);
+                let mut wt = vec![0.0; n_time * kw_time];
+                let mut yv = vec![0.0; n_time];
+                for t in 0..n_time {
+                    let mut tot = v_time[idx(t, q, n_time)];
+                    for k in 0..kw_time {
+                        wt[idx(t, k, n_time)] = w_time[idx(t, k, n_time)];
+                        tot += gamma_w_time[idx(k, q, kw_time)] * w_time[idx(t, k, n_time)];
+                    }
+                    for q2 in 0..q_time {
+                        if q2 != q {
+                            let o_q2 = om_t_inv[idx(q, q2, q_time)];
+                            if o_q2.abs() > 1e-14 {
+                                tot += (o_q2 / o_qq) * v_time[idx(t, q2, n_time)];
+                            }
+                        }
+                    }
+                    yv[t] = tot;
+                }
+                let wtw = mat_t_mul(&wt, &wt, kw_time, n_time, kw_time);
+                let wty = mat_t_mul(&wt, &yv, kw_time, n_time, 1);
+                let mut pr = vec![0.0; kw_time * kw_time];
+                for i in 0..(kw_time * kw_time) {
+                    pr[i] = wtw[i] * o_qq;
+                }
+                for i in 0..kw_time {
+                    pr[idx(i, i, kw_time)] += p_pr;
+                }
+                let inf: Vec<f64> = wty.iter().map(|v| v * o_qq).collect();
+                let b = rmvnorm_precision(&mut rng, &pr, &inf, kw_time);
+                let old_gw: Vec<f64> = (0..kw_time)
+                    .map(|k| gamma_w_time[idx(k, q, kw_time)])
+                    .collect();
+                for k in 0..kw_time {
+                    gamma_w_time[idx(k, q, kw_time)] = b[k];
+                }
+                for t in 0..n_time {
+                    let mut dl = 0.0;
+                    for k in 0..kw_time {
+                        dl += (old_gw[k] - gamma_w_time[idx(k, q, kw_time)])
+                            * w_time[idx(t, k, n_time)];
+                    }
+                    v_time[idx(t, q, n_time)] += dl;
+                }
+            }
+        }
+
         let mut sid = eye(q_id, 0.05);
         for g in 0..n_id {
             for ca in 0..q_id {
@@ -485,25 +805,47 @@ pub fn mcmc_crossclassified(
         }
         omega_id = rinv_wishart(&mut rng, (q_id as f64 + 2.0) + n_id as f64, &sid, q_id);
 
-        let mut st_m = eye(d, 0.05);
+        let mut st_m = eye(q_time, 0.05);
         for t in 0..n_time {
-            for ca in 0..d {
-                for ra in 0..d {
-                    st_m[idx(ra, ca, d)] += v_time[idx(t, ra, n_time)] * v_time[idx(t, ca, n_time)];
+            for ca in 0..q_time {
+                for ra in 0..q_time {
+                    st_m[idx(ra, ca, q_time)] +=
+                        v_time[idx(t, ra, n_time)] * v_time[idx(t, ca, n_time)];
                 }
             }
         }
-        omega_time = rinv_wishart(&mut rng, (d as f64 + 2.0) + n_time as f64, &st_m, d);
+        omega_time = rinv_wishart(
+            &mut rng,
+            (q_time as f64 + 2.0) + n_time as f64,
+            &st_m,
+            q_time,
+        );
+
+        let _ = &id_sl_flats;
 
         if keep_pos < n_keep && step == keep_indices[keep_pos] {
+            // Refresh vt_tot after gamma_w_time update
+            for t in 0..n_time {
+                let v_t = build_vt_tot(t, &gamma_w_time, &v_time);
+                for q in 0..q_time {
+                    vt_tot[idx(t, q, n_time)] = v_t[q];
+                }
+            }
+
             let mut cur = 0usize;
             for &g0 in &gamma0 {
                 draws[idx(keep_pos, cur, n_keep)] = g0;
                 cur += 1;
             }
             for q in 0..q_id {
-                for k in 0..kw {
-                    draws[idx(keep_pos, cur, n_keep)] = gamma_w[idx(k, q, kw)];
+                for k in 0..kw_id {
+                    draws[idx(keep_pos, cur, n_keep)] = gamma_w_id[idx(k, q, kw_id)];
+                    cur += 1;
+                }
+            }
+            for q in 0..q_time {
+                for k in 0..kw_time {
+                    draws[idx(keep_pos, cur, n_keep)] = gamma_w_time[idx(k, q, kw_time)];
                     cur += 1;
                 }
             }
@@ -517,52 +859,50 @@ pub fn mcmc_crossclassified(
                     cur += 1;
                 }
             }
-            for ca in 0..d {
-                for ra in ca..d {
-                    draws[idx(keep_pos, cur, n_keep)] = omega_time[idx(ra, ca, d)];
+            for ca in 0..q_time {
+                for ra in ca..q_time {
+                    draws[idx(keep_pos, cur, n_keep)] = omega_time[idx(ra, ca, q_time)];
                     cur += 1;
                 }
             }
-            for &s2 in &fixed_sigma2 {
-                draws[idx(keep_pos, cur, n_keep)] = s2;
-                cur += 1;
-            }
-            for q in 0..q_id {
-                for g in 0..n_id {
-                    id_draws[keep_pos + n_keep * (g + n_id * q)] =
-                        gamma0[q] + u_id[idx(g, q, n_id)];
+            for j in 0..d {
+                if lv_id_idx[j] < 0 {
+                    draws[idx(keep_pos, cur, n_keep)] = fixed_sigma2[j];
+                    cur += 1;
                 }
             }
-            for j in 0..d {
+
+            for q in 0..q_id {
+                for g in 0..n_id {
+                    let mut tot = gamma0[q] + u_id[idx(g, q, n_id)];
+                    for k in 0..kw_id {
+                        tot += gamma_w_id[idx(k, q, kw_id)] * w_id[idx(g, k, n_id)];
+                    }
+                    id_draws[keep_pos + n_keep * (g + n_id * q)] = tot;
+                }
+            }
+            for q in 0..q_time {
                 for t in 0..n_time {
-                    time_draws[keep_pos + n_keep * (t + n_time * j)] = v_time[idx(t, j, n_time)];
+                    time_draws[keep_pos + n_keep * (t + n_time * q)] = vt_tot[idx(t, q, n_time)];
                 }
             }
 
             let mut ll = 0.0;
             for g in 0..n_id {
                 let st = g * n_time;
-                let th_g = build_th(g, &gamma0, &gamma_w, &u_id);
-                let sl_g = if has_random_slopes {
-                    th_g[d..(d + n_rs)].to_vec()
-                } else {
-                    fixed_slopes.clone()
-                };
+                let th_g = build_th_id(g, &gamma0, &gamma_w_id, &u_id);
                 for j in 0..d {
-                    let s2 = if has_random_logv {
-                        th_g[d + n_rs + j].clamp(-10.0, 10.0).exp()
+                    let s2 = if lv_id_idx[j] >= 0 {
+                        th_g[lv_id_idx[j] as usize].clamp(-10.0, 10.0).exp()
                     } else {
                         fixed_sigma2[j].max(1e-6)
                     };
                     sig_accum[idx(g, j, n_id)] += s2;
                     for t in 0..n_time {
                         let fv = if t >= max_lag {
-                            cc_cell_mean(
-                                &y_work, x_grid, &v_time, st, t, j, d, kx, lags, max_lag, &th_g,
-                                &sl_g, n_time, n_obs,
-                            )
+                            cell_mean(&y_work, st, t, j, &th_g, &vt_tot, &fixed_slopes)
                         } else {
-                            th_g[j] + v_time[idx(t, j, n_time)]
+                            th_g[j] + vt_tot[idx(t, j, n_time)]
                         };
                         fitted_accum[idx(st + t, j, n_obs)] += fv;
                         if t >= max_lag && !miss_y[idx(st + t, j, n_obs)] {
@@ -601,44 +941,10 @@ pub fn mcmc_crossclassified(
         param_count: n_params,
         id_draws,
         time_draws,
+        q_id,
+        q_time,
         fitted_mean,
         dic,
         pd,
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn cc_cell_mean(
-    y: &[f64],
-    x: &[f64],
-    v_time: &[f64],
-    st: usize,
-    t: usize,
-    j: usize,
-    d: usize,
-    kx: usize,
-    lags: &[usize],
-    max_lag: usize,
-    th: &[f64],
-    sl: &[f64],
-    n_time: usize,
-    n_obs: usize,
-) -> f64 {
-    let n_lags = lags.len();
-    let n_sl = n_lags * d + kx;
-    let mut pr = th[j] + v_time[idx(t, j, n_time)];
-    for k in 0..kx {
-        pr += sl[j * n_sl + n_lags * d + k] * x[idx(st + t, k, n_obs)];
-    }
-    if t < max_lag {
-        return pr;
-    }
-    for (li, &lv) in lags.iter().enumerate() {
-        for mc in 0..d {
-            let phi = sl[j * n_sl + li * d + mc];
-            let dev = y[idx(st + t - lv, mc, n_obs)] - th[mc] - v_time[idx(t - lv, mc, n_time)];
-            pr += phi * dev;
-        }
-    }
-    pr
 }

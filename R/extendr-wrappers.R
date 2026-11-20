@@ -32,8 +32,8 @@ dsem_rust_threelevel <- function(y, x, l2_sizes, l3_of_l2, w2, w3, lags, masks, 
 }
 
 #' @keywords internal
-dsem_rust_crossclassified <- function(y_grid, x_grid, w_id, lags, dims, beta_sd) {
-  .Call(wrap__dsem_rust_crossclassified, y_grid, x_grid, w_id, lags, dims, beta_sd)
+dsem_rust_crossclassified <- function(y_grid, x_grid, w_id, w_time, lags, masks, dims, beta_sd) {
+  .Call(wrap__dsem_rust_crossclassified, y_grid, x_grid, w_id, w_time, lags, masks, dims, beta_sd)
 }
 
 #' @keywords internal

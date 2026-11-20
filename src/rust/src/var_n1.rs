@@ -2,7 +2,7 @@ use crate::linalg::{
     chol_lower_jitter, eye, idx, mat_t_mul, quad_form, rinv_wishart, rmvnorm_precision, spd_invert,
     spd_logdet, symmetrize,
 };
-use crate::rng::Rng;
+use crate::rng::{log_std_norm_cdf, Rng};
 use std::f64::consts::PI;
 
 #[allow(clippy::too_many_arguments)]
@@ -15,14 +15,16 @@ pub struct VarN1Output {
     pub d_bar: f64,
 }
 
-/// General N=1 Multivariate VAR(p) / Covariate / RDSEM / Probit Gibbs sampler.
+/// General N=1 Multivariate VAR(p) / Covariate / RDSEM / Probit / Tobit Censored Gibbs sampler.
 /// Supports:
 /// - d >= 1 outcomes, max_lag >= 1
 /// - kx >= 0 exogenous covariates
 /// - residual_dynamics (RDSEM: y_t = alpha + B_x x_t + u_t, u_t = sum_l Phi_l u_{t-l} + e_t)
-/// - outcome_types: 0 = continuous, >= 2 = K-category ordinal/binary probit (values 0..K-1)
+/// - outcome_types: `0` = continuous uncensored, `>= 2` = K-category ordinal/binary probit
+///   (values `0..K-1`), `-1` = left-censored (below `censor_lo`), `-2` = right-censored
+///   (above `censor_hi`), `-3` = interval/two-sided censored at `[censor_lo, censor_hi]`
 /// - missing values (NaN) imputed in Gibbs on the regular / TINTERVAL grid
-/// - prior_mode: 0 = weakly informative proper, 1 = Mplus flat/IG(-1,0), 2 = PSEM shrinkage (Laplace/Lasso)
+/// - prior_mode: 0 = weakly informative proper, 1 = diffuse flat/IG(-1,0), 2 = PSEM shrinkage (Laplace/Lasso)
 #[allow(clippy::too_many_arguments)]
 pub fn mcmc_var_n1(
     y_in: &[f64], // n_time x d (col-major)
@@ -31,9 +33,11 @@ pub fn mcmc_var_n1(
     d: usize,
     kx: usize,
     lags: &[usize],        // active lag orders, e.g. [1] or [1, 2]
-    outcome_types: &[i32], // 0 = continuous, K >= 2 = K categories (0..K-1)
+    outcome_types: &[i32], // 0 = cont, >=2 = K-cat probit, -1/-2/-3 = censored
+    censor_lo: &[f64],     // length d (lower censoring thresholds)
+    censor_hi: &[f64],     // length d (upper censoring thresholds)
     residual_dynamics: bool,
-    prior_mode: i32, // 0 = default, 1 = mplus, 2 = penalized (PSEM)
+    prior_mode: i32, // 0 = default, 1 = diffuse, 2 = penalized (PSEM)
     beta_sd: f64,
     sigma_shape: f64,
     sigma_scale: f64,
@@ -46,10 +50,14 @@ pub fn mcmc_var_n1(
     let max_lag = lags.iter().copied().max().unwrap_or(1).max(1);
     let n_lags = lags.len();
     let is_cat: Vec<bool> = outcome_types.iter().map(|&k| k >= 2).collect();
+    let is_cens: Vec<bool> = outcome_types.iter().map(|&k| k < 0).collect();
+    let any_cens = is_cens.iter().any(|&b| b);
 
     // Initialize working continuous latent/imputed y_work (n_time x d)
+    // cens_flag: 0 = observed uncensored, -1 = left-censored (<= lo), 1 = right-censored (>= hi)
     let mut y_work = y_in.to_vec();
     let mut missing_mask = vec![false; n_time * d];
+    let mut cens_flag = vec![0i8; n_time * d];
     for col in 0..d {
         let mut sum = 0.0;
         let mut cnt = 0usize;
@@ -63,13 +71,26 @@ pub fn mcmc_var_n1(
             }
         }
         let mean = if cnt > 0 { sum / cnt as f64 } else { 0.0 };
+        let lo_c = censor_lo.get(col).copied().unwrap_or(f64::NEG_INFINITY);
+        let hi_c = censor_hi.get(col).copied().unwrap_or(f64::INFINITY);
+        let ot = outcome_types[col];
         for t in 0..n_time {
-            if missing_mask[idx(t, col, n_time)] {
-                y_work[idx(t, col, n_time)] = if is_cat[col] { 0.0 } else { mean };
+            let cell = idx(t, col, n_time);
+            if missing_mask[cell] {
+                y_work[cell] = if is_cat[col] { 0.0 } else { mean };
             } else if is_cat[col] {
                 let k_cat = outcome_types[col].max(2) as f64;
-                let cat = y_in[idx(t, col, n_time)];
-                y_work[idx(t, col, n_time)] = ((cat + 0.5) / k_cat - 0.5) * 2.0;
+                let cat = y_in[cell];
+                y_work[cell] = ((cat + 0.5) / k_cat - 0.5) * 2.0;
+            } else if ot < 0 {
+                let v = y_in[cell];
+                if (ot == -1 || ot == -3) && lo_c.is_finite() && v <= lo_c + 1e-12 {
+                    cens_flag[cell] = -1;
+                    y_work[cell] = lo_c - 0.25;
+                } else if (ot == -2 || ot == -3) && hi_c.is_finite() && v >= hi_c - 1e-12 {
+                    cens_flag[cell] = 1;
+                    y_work[cell] = hi_c + 0.25;
+                }
             }
         }
     }
@@ -132,14 +153,20 @@ pub fn mcmc_var_n1(
     for step in 1..=iter {
         let sigma_inv = spd_invert(&sigma, d);
 
-        // 1. Probit data augmentation & missing-data Gibbs imputation
+        // 1. Probit / Tobit censored data augmentation & missing-data Gibbs imputation
         for t in 0..n_time {
             for j in 0..d {
+                let cell = idx(t, j, n_time);
+                let is_miss = missing_mask[cell];
+                let c_flag = cens_flag[cell];
+                if !is_cat[j] && !is_miss && c_flag == 0 {
+                    continue;
+                }
                 let cond_var = (1.0 / sigma_inv[idx(j, j, d)].max(1e-8)).clamp(1e-6, 100.0);
                 let cond_sd = if is_cat[j] { 1.0 } else { cond_var.sqrt() };
 
-                // Compute conditional mean of y_{t,j} from current-time structural/dynamic equation
-                let mu_tj = predict_var_cell(
+                // Conditional mean of y_{t,j} from current-time equation (conditioning on y_{t,-j} if d > 1)
+                let mut mu_tj = predict_var_cell(
                     &y_work,
                     x_in,
                     &beta_mat,
@@ -153,9 +180,62 @@ pub fn mcmc_var_n1(
                     t,
                     j,
                 );
+                if d > 1 && t >= max_lag {
+                    let s_jj = sigma_inv[idx(j, j, d)].max(1e-8);
+                    for k in 0..d {
+                        if k != j {
+                            let s_jk = sigma_inv[idx(j, k, d)];
+                            if s_jk.abs() > 1e-14 {
+                                let mu_tk = predict_var_cell(
+                                    &y_work,
+                                    x_in,
+                                    &beta_mat,
+                                    n_time,
+                                    d,
+                                    kx,
+                                    lags,
+                                    max_lag,
+                                    p_reg,
+                                    residual_dynamics,
+                                    t,
+                                    k,
+                                );
+                                mu_tj -= (s_jk / s_jj) * (y_work[idx(t, k, n_time)] - mu_tk);
+                            }
+                        }
+                    }
+                }
 
-                if is_cat[j] && !missing_mask[idx(t, j, n_time)] {
-                    let obs_cat = y_in[idx(t, j, n_time)].round() as i32;
+                // Combine current-time Gaussian likelihood with future lag appearances t + lag < n_time
+                let mut prec = 1.0 / (cond_sd * cond_sd);
+                let mut info = mu_tj * prec;
+                if !residual_dynamics && (is_miss || c_flag != 0) {
+                    for (l_idx, &lag_val) in lags.iter().enumerate() {
+                        let t_fut = t + lag_val;
+                        if t_fut >= max_lag && t_fut < n_time {
+                            let reg_row = 1 + l_idx * d + j;
+                            for m_out in 0..d {
+                                let phi_mj = beta_mat[idx(reg_row, m_out, p_reg)];
+                                if phi_mj.abs() > 1e-12 {
+                                    let sig_mm = sigma[idx(m_out, m_out, d)].max(1e-6);
+                                    let mu_fut = predict_var_cell(
+                                        &y_work, x_in, &beta_mat, n_time, d, kx, lags, max_lag,
+                                        p_reg, false, t_fut, m_out,
+                                    );
+                                    let r_without = y_work[idx(t_fut, m_out, n_time)]
+                                        - (mu_fut - phi_mj * y_work[cell]);
+                                    prec += (phi_mj * phi_mj) / sig_mm;
+                                    info += phi_mj * r_without / sig_mm;
+                                }
+                            }
+                        }
+                    }
+                }
+                let post_sd = (1.0 / prec.max(1e-8)).sqrt();
+                let post_mean = info / prec.max(1e-8);
+
+                if is_cat[j] && !is_miss {
+                    let obs_cat = y_in[cell].round() as i32;
                     let k_cat = outcome_types[j];
                     let (lo, hi) = if k_cat == 2 {
                         if obs_cat <= 0 {
@@ -178,44 +258,24 @@ pub fn mcmc_var_n1(
                         };
                         (lower, upper)
                     };
-                    y_work[idx(t, j, n_time)] = rng.rtruncnorm(mu_tj, 1.0, lo, hi);
-                } else if missing_mask[idx(t, j, n_time)] {
-                    // Include information from future lags t + lag <= n_time - 1
-                    let mut prec = 1.0 / (cond_sd * cond_sd);
-                    let mut info = mu_tj * prec;
-                    if !residual_dynamics {
-                        for (l_idx, &lag_val) in lags.iter().enumerate() {
-                            let t_fut = t + lag_val;
-                            if t_fut >= max_lag && t_fut < n_time {
-                                let reg_row = 1 + l_idx * d + j;
-                                for m_out in 0..d {
-                                    let phi_mj = beta_mat[idx(reg_row, m_out, p_reg)];
-                                    if phi_mj.abs() > 1e-12 {
-                                        let sig_mm = sigma[idx(m_out, m_out, d)].max(1e-6);
-                                        let mu_fut = predict_var_cell(
-                                            &y_work, x_in, &beta_mat, n_time, d, kx, lags, max_lag,
-                                            p_reg, false, t_fut, m_out,
-                                        );
-                                        let r_without = y_work[idx(t_fut, m_out, n_time)]
-                                            - (mu_fut - phi_mj * y_work[idx(t, j, n_time)]);
-                                        prec += (phi_mj * phi_mj) / sig_mm;
-                                        info += phi_mj * r_without / sig_mm;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let post_sd = (1.0 / prec.max(1e-8)).sqrt();
-                    let post_mean = info / prec.max(1e-8);
-                    y_work[idx(t, j, n_time)] = post_mean + post_sd * rng.rnorm();
+                    y_work[cell] = rng.rtruncnorm(mu_tj, 1.0, lo, hi);
+                } else if c_flag != 0 {
+                    let (lo, hi) = if c_flag < 0 {
+                        (f64::NEG_INFINITY, censor_lo.get(j).copied().unwrap_or(0.0))
+                    } else {
+                        (censor_hi.get(j).copied().unwrap_or(0.0), f64::INFINITY)
+                    };
+                    y_work[cell] = rng.rtruncnorm(post_mean, post_sd, lo, hi);
+                } else if is_miss {
+                    y_work[cell] = post_mean + post_sd * rng.rnorm();
                 }
             }
         }
 
         // Update ordinal extra thresholds (for K >= 3) via uniform-window MH
         for j in 0..d {
-            let k_cat = outcome_types[j] as usize;
-            if k_cat >= 3 {
+            if outcome_types[j] >= 3 {
+                let k_cat = outcome_types[j] as usize;
                 for c in 1..(k_cat - 1) {
                     let mut lo_bound = extra_thresholds[j][c - 1] + 1e-4;
                     let mut hi_bound = if c + 1 < k_cat - 1 {
@@ -550,8 +610,8 @@ pub fn mcmc_var_n1(
                 }
             }
             for j in 0..d {
-                let k_cat = outcome_types[j] as usize;
-                if k_cat >= 3 {
+                if outcome_types[j] >= 3 {
+                    let k_cat = outcome_types[j] as usize;
                     let int_j = beta_mat[idx(0, j, p_reg)];
                     for &tau_c in extra_thresholds[j].iter().take(k_cat - 1).skip(1) {
                         draws[idx(keep_pos, p_cursor, n_keep)] = tau_c - int_j;
@@ -591,7 +651,31 @@ pub fn mcmc_var_n1(
                 }
             }
 
-            let ll = var_loglik(&e_mat, &sigma, n_eff, d);
+            let ll = if any_cens && d == 1 {
+                let sd0 = sigma[0].max(1e-8).sqrt();
+                let lo0 = censor_lo.first().copied().unwrap_or(f64::NEG_INFINITY);
+                let hi0 = censor_hi.first().copied().unwrap_or(f64::INFINITY);
+                let mut lsum = 0.0;
+                for (r, &e_r) in e_mat.iter().enumerate().take(n_eff) {
+                    let t = r + max_lag;
+                    if missing_mask[t] {
+                        continue;
+                    }
+                    let pred = y_work[t] - e_r;
+                    match cens_flag[t] {
+                        -1 => lsum += log_std_norm_cdf((lo0 - pred) / sd0),
+                        1 => lsum += log_std_norm_cdf((pred - hi0) / sd0),
+                        _ => {
+                            let err = y_in[t] - pred;
+                            lsum +=
+                                -0.5 * ((2.0 * PI * sd0 * sd0).ln() + (err * err) / (sd0 * sd0));
+                        }
+                    }
+                }
+                lsum
+            } else {
+                var_loglik(&e_mat, &sigma, n_eff, d)
+            };
             deviance_sum += -2.0 * ll;
             keep_pos += 1;
         }
@@ -622,10 +706,39 @@ pub fn mcmc_var_n1(
             e_bar[idx(r, j, n_eff)] = y_work[idx(t, j, n_time)] - pred;
         }
     }
-    let d_bar = deviance_sum * inv_keep;
-    let d_hat = -2.0 * var_loglik(&e_bar, &sigma_bar, n_eff, d);
-    let pd = (d_bar - d_hat).max(0.0);
-    let dic = d_bar + pd;
+    let has_continuous = is_cat.iter().any(|&b| !b);
+    let (dic, pd, d_bar) = if any_cens && d == 1 {
+        let db = deviance_sum * inv_keep;
+        let sd0 = sigma_bar[0].max(1e-8).sqrt();
+        let lo0 = censor_lo.first().copied().unwrap_or(f64::NEG_INFINITY);
+        let hi0 = censor_hi.first().copied().unwrap_or(f64::INFINITY);
+        let mut lhat = 0.0;
+        for r in 0..n_eff {
+            let t = r + max_lag;
+            if missing_mask[t] {
+                continue;
+            }
+            let pred = fitted_mean[t];
+            match cens_flag[t] {
+                -1 => lhat += log_std_norm_cdf((lo0 - pred) / sd0),
+                1 => lhat += log_std_norm_cdf((pred - hi0) / sd0),
+                _ => {
+                    let err = y_in[t] - pred;
+                    lhat += -0.5 * ((2.0 * PI * sd0 * sd0).ln() + (err * err) / (sd0 * sd0));
+                }
+            }
+        }
+        let d_hat = -2.0 * lhat;
+        let pd_v = (db - d_hat).max(0.0);
+        (db + pd_v, pd_v, db)
+    } else if has_continuous && !any_cens {
+        let db = deviance_sum * inv_keep;
+        let d_hat = -2.0 * var_loglik(&e_bar, &sigma_bar, n_eff, d);
+        let pd_v = (db - d_hat).max(0.0);
+        (db + pd_v, pd_v, db)
+    } else {
+        (f64::NAN, f64::NAN, f64::NAN)
+    };
 
     VarN1Output {
         draws,

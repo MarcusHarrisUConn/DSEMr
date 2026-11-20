@@ -2,9 +2,14 @@
 % Please edit documentation in R/standardize.R
 \name{dsem_standardize}
 \alias{dsem_standardize}
-\title{Compute Mplus-compatible standardized DSEM estimates (STDYX, STDY, STD)}
+\title{Compute standardized DSEM estimates (STDYX, STDY, STD)}
 \usage{
-dsem_standardize(object, type = c("stdyx", "stdy", "std"), prob = 0.95)
+dsem_standardize(
+  object,
+  type = c("stdyx", "stdy", "std"),
+  prob = 0.95,
+  cluster = FALSE
+)
 }
 \arguments{
 \item{object}{A fitted \code{DSEMfit} object.}
@@ -14,18 +19,34 @@ outcome and predictor SDs), \code{"stdy"} (standardizes by outcome SD only), or
 \code{"std"} (standardizes latent variables only).}
 
 \item{prob}{Credible interval probability (default \code{0.95}).}
+
+\item{cluster}{Logical; if \code{TRUE} on a multilevel model, returns
+cluster-specific standardized within-person slopes (\code{cluster}, \code{parameter},
+\code{type}, \code{mean}, \code{sd}, \code{q_lower}, \code{q50}, \code{q_upper}, \code{p_one_tailed}) instead
+of population-level summaries.}
 }
 \value{
-A data frame of standardized parameter summaries (\code{parameter},
-\code{type}, \code{mean}, \code{sd}, \code{q_lower}, \code{q50}, \code{q_upper}, \code{p_one_tailed}).
+A data frame of standardized parameter summaries (\code{level},
+\code{parameter}, \code{type}, \code{mean}, \code{sd}, \code{q_lower}, \code{q50}, \code{q_upper},
+\code{p_one_tailed}), or per-cluster summaries when \code{cluster = TRUE}.
 }
 \description{
-Computes posterior summaries of standardized model parameters matching Mplus
-\verb{OUTPUT: STDYX STDY STD;}. For multilevel (\code{twolevel}, \code{threelevel}, and
-\code{crossclassified}) models, within-cluster slopes are standardized within each
-cluster using cluster-specific model-implied variances and then averaged
-across clusters at each posterior draw following Schuurman, Ferrer,
-de Boer-Sonnenschein, and Hamaker (2016).
+Computes posterior summaries of standardized model parameters (\code{STDYX},
+\code{STDY}, and \code{STD}). For multilevel (\code{twolevel}, \code{threelevel}, and
+\code{crossclassified}) models:
+\itemize{
+\item Within-level slopes (including labeled random slopes such as \code{s}, \code{sy},
+\code{sx}, and cross-lagged slopes \code{s12}, \code{s21}) are standardized within each
+cluster using cluster-specific model-implied standard deviations and then
+averaged across clusters at each posterior draw following Schuurman,
+Ferrer, de Boer-Sonnenschein, and Hamaker (2016).
+\item Setting \code{cluster = TRUE} returns individual cluster-specific standardized
+within-level estimates for idiographic interpretation.
+\item Between-level regressions, covariances (standardized to residual
+correlations), residual variances (\code{1 - R^2}), and intercepts are
+standardized using draw-specific model-implied between-level standard
+deviations.
+}
 }
 \examples{
 dat <- simulate_dsem(n = 80, ar = 0.5, sigma = 0.8, seed = 10)

@@ -28,11 +28,14 @@
 
   mplus_clusters <- character()
   mplus_categorical <- character()
+  mplus_censored <- list()
   mplus_between <- character()
+  mplus_between_groups <- character()
   mplus_within <- character()
   mplus_time <- NULL
   mplus_tinterval <- NULL
   mplus_centering <- NULL
+  mplus_centered_vars <- character()
   mplus_level_type <- NULL
   mplus_prior_mode <- NULL
 
@@ -58,7 +61,7 @@
           mplus_prior_mode <- "penalized"
         }
       } else {
-        .dsem_abort("Unsupported Mplus ANALYSIS statement: `%s`.", st)
+        .dsem_abort("Unsupported ANALYSIS statement: `%s`.", st)
       }
     }
   }
@@ -82,43 +85,81 @@
       } else if (grepl("^CATEGORICAL\\s*(=|ARE|IS)\\s*", st_clean, ignore.case = TRUE)) {
         rhs <- sub("^CATEGORICAL\\s*(=|ARE|IS)\\s*", "", st_clean, ignore.case = TRUE)
         mplus_categorical <- unlist(lapply(strsplit(trimws(rhs), "\\s+")[[1L]], .dsem_expand_mplus_range, symbols = symbol_order))
+      } else if (grepl("^CENSORED\\s*(=|ARE|IS)\\s*", st_clean, ignore.case = TRUE)) {
+        rhs <- sub("^CENSORED\\s*(=|ARE|IS)\\s*", "", st_clean, ignore.case = TRUE)
+        # Parse pairs like `y (b)`, `y1-y2 (a)`, `y (ab)` / `y (bi)` / `y (ai)`
+        cm <- gregexpr("([.A-Za-z][.A-Za-z0-9_-]*(?:\\s+[.A-Za-z][.A-Za-z0-9_-]*)*)\\s*\\(\\s*([^)]+)\\s*\\)", rhs, perl = TRUE)[[1L]]
+        if (!identical(cm, -1L)) {
+          segs <- regmatches(rhs, list(cm))[[1L]]
+          for (sg in segs) {
+            pm <- regexec("^(.+?)\\s*\\(\\s*([^)]+)\\s*\\)$", trimws(sg))
+            cap <- regmatches(trimws(sg), pm)[[1L]]
+            if (length(cap) >= 3L) {
+              vtoks <- unlist(lapply(strsplit(trimws(cap[2L]), "\\s+")[[1L]], .dsem_expand_mplus_range, symbols = symbol_order))
+              flag <- tolower(gsub("\\s+", "", cap[3L]))
+              dir <- if (grepl("b", flag) && grepl("a", flag)) "both" else if (grepl("a", flag)) "above" else "below"
+              for (vn in vtoks) mplus_censored[[vn]] <- dir
+            }
+          }
+        } else {
+          vtoks <- unlist(lapply(strsplit(trimws(rhs), "\\s+")[[1L]], .dsem_expand_mplus_range, symbols = symbol_order))
+          for (vn in vtoks) mplus_censored[[vn]] <- "below"
+        }
       } else if (grepl("^BETWEEN\\s*(=|ARE|IS)\\s*", st_clean, ignore.case = TRUE)) {
-        rhs <- gsub("\\([^)]*\\)", "", sub("^BETWEEN\\s*(=|ARE|IS)\\s*", "", st_clean, ignore.case = TRUE))
-        mplus_between <- unlist(lapply(strsplit(trimws(rhs), "\\s+")[[1L]], .dsem_expand_mplus_range, symbols = symbol_order))
+        raw_rhs <- sub("^BETWEEN\\s*(=|ARE|IS)\\s*", "", st_clean, ignore.case = TRUE)
+        gm <- gregexpr("\\(\\s*([.A-Za-z][.A-Za-z0-9_]*)\\s*\\)", raw_rhs, perl = TRUE)[[1L]]
+        if (!identical(gm, -1L)) {
+          gstrs <- regmatches(raw_rhs, list(gm))[[1L]]
+          mplus_between_groups <- unique(c(mplus_between_groups, trimws(gsub("[()]", "", gstrs))))
+        }
+        rhs <- gsub("\\([^)]*\\)", " ", raw_rhs)
+        mplus_between <- unique(c(
+          mplus_between,
+          unlist(lapply(strsplit(trimws(rhs), "\\s+")[[1L]], .dsem_expand_mplus_range, symbols = symbol_order))
+        ))
       } else if (grepl("^WITHIN\\s*(=|ARE|IS)\\s*", st_clean, ignore.case = TRUE)) {
-        rhs <- gsub("\\([^)]*\\)", "", sub("^WITHIN\\s*(=|ARE|IS)\\s*", "", st_clean, ignore.case = TRUE))
-        mplus_within <- unlist(lapply(strsplit(trimws(rhs), "\\s+")[[1L]], .dsem_expand_mplus_range, symbols = symbol_order))
+        rhs <- gsub("\\([^)]*\\)", " ", sub("^WITHIN\\s*(=|ARE|IS)\\s*", "", st_clean, ignore.case = TRUE))
+        mplus_within <- unique(c(
+          mplus_within,
+          unlist(lapply(strsplit(trimws(rhs), "\\s+")[[1L]], .dsem_expand_mplus_range, symbols = symbol_order))
+        ))
       } else if (grepl("^TINTERVAL\\s*(=|IS)\\s*", st_clean, ignore.case = TRUE)) {
         rhs <- sub("^TINTERVAL\\s*(=|IS)\\s*", "", st_clean, ignore.case = TRUE)
         m <- regexec("^([.A-Za-z][.A-Za-z0-9_]*)\\s*\\(\\s*([0-9.]+)\\s*\\)$", trimws(rhs))
         cap <- regmatches(trimws(rhs), m)[[1L]]
-        if (!length(cap)) .dsem_abort("Invalid Mplus TINTERVAL specification: `%s`.", st_clean)
+        if (!length(cap)) .dsem_abort("Invalid TINTERVAL specification: `%s`.", st_clean)
         mplus_time <- cap[2L]
         mplus_tinterval <- as.numeric(cap[3L])
       } else if (grepl("^(LAGGED|MISSING|IDVARIABLE|AUXILIARY)\\s*(=|ARE|IS)", st_clean, ignore.case = TRUE)) {
         # Valid metadata variable declarations
       } else {
-        .dsem_abort("Unsupported Mplus VARIABLE statement: `%s`.", st_clean)
+        .dsem_abort("Unsupported VARIABLE statement: `%s`.", st_clean)
       }
     }
   }
 
-  # Parse DEFINE section (CENTER x (GROUPMEAN | GRANDMEAN))
+  # Parse DEFINE section (CENTER x (GROUPMEAN [cluster] | GRANDMEAN))
   if (!is.null(bodies[["DEFINE"]])) {
     stmts <- trimws(unlist(strsplit(bodies[["DEFINE"]], ";", fixed = TRUE)))
     for (st in stmts[nzchar(stmts)]) {
       st_clean <- .dsem_trim(gsub("\n", " ", st))
-      if (grepl("^CENTER\\s+.+\\(\\s*GROUPMEAN\\s*\\)$", st_clean, ignore.case = TRUE)) {
+      if (grepl("^CENTER\\s+.+\\(\\s*GROUPMEAN(?:\\s+[.A-Za-z][.A-Za-z0-9_]*)?\\s*\\)$", st_clean, ignore.case = TRUE)) {
         mplus_centering <- "groupmean"
+        var_part <- trimws(sub("\\([^)]*\\)$", "", sub("^CENTER\\s+", "", st_clean, ignore.case = TRUE)))
+        toks <- unlist(lapply(strsplit(var_part, "\\s+")[[1L]], .dsem_expand_mplus_range, symbols = symbol_order))
+        mplus_centered_vars <- unique(c(mplus_centered_vars, toks))
       } else if (grepl("^CENTER\\s+.+\\(\\s*GRANDMEAN\\s*\\)$", st_clean, ignore.case = TRUE)) {
         mplus_centering <- "grandmean"
+        var_part <- trimws(sub("\\([^)]*\\)$", "", sub("^CENTER\\s+", "", st_clean, ignore.case = TRUE)))
+        toks <- unlist(lapply(strsplit(var_part, "\\s+")[[1L]], .dsem_expand_mplus_range, symbols = symbol_order))
+        mplus_centered_vars <- unique(c(mplus_centered_vars, toks))
       } else {
-        .dsem_abort("Unsupported Mplus DEFINE statement: `%s`.", st_clean)
+        .dsem_abort("Unsupported DEFINE statement: `%s`.", st_clean)
       }
     }
   }
 
-  # Resolve cluster mapping for TWOLEVEL, THREELEVEL (Mplus: CLUSTER = L3 L2), CROSSCLASSIFIED (Mplus: CLUSTER = time subject)
+  # Resolve cluster mapping for TWOLEVEL, THREELEVEL (CLUSTER = L3 L2), CROSSCLASSIFIED (CLUSTER = subject time or time subject)
   mplus_id <- NULL
   mplus_time_cluster <- NULL
   if (length(mplus_clusters) == 1L) {
@@ -126,11 +167,26 @@
     if (is.null(mplus_level_type)) mplus_level_type <- "twolevel"
   } else if (length(mplus_clusters) == 2L) {
     if (identical(mplus_level_type, "crossclassified")) {
-      mplus_time_cluster <- mplus_clusters[1L]
-      mplus_id <- mplus_clusters[2L]
+      c1 <- mplus_clusters[1L]; c2 <- mplus_clusters[2L]
+      time_like <- c("time", "occasion", "occ", "wave", "t", "day")
+      c1_is_time <- tolower(c1) %in% time_like || (!is.null(mplus_time) && tolower(c1) == tolower(mplus_time))
+      c2_is_time <- tolower(c2) %in% time_like || (!is.null(mplus_time) && tolower(c2) == tolower(mplus_time))
+      if (c2_is_time && !c1_is_time) {
+        mplus_id <- c1
+        mplus_time_cluster <- c2
+      } else if (c1_is_time && !c2_is_time) {
+        mplus_time_cluster <- c1
+        mplus_id <- c2
+      } else if (tolower(c1) %in% tolower(mplus_between_groups) && !tolower(c2) %in% tolower(mplus_between_groups)) {
+        mplus_id <- c1
+        mplus_time_cluster <- c2
+      } else {
+        mplus_time_cluster <- c1
+        mplus_id <- c2
+      }
     } else {
       mplus_level_type <- "threelevel"
-      # Mplus lists highest level first: CLUSTER = level3 level2
+      # Three-level syntax lists highest level first: CLUSTER = level3 level2
       mplus_id <- c(mplus_clusters[2L], mplus_clusters[1L])
     }
   }
@@ -257,7 +313,18 @@
         random <- TRUE
       }
       lhs_tokens <- .dsem_expand_mplus_list(lhs_seg, symbol_order)
-      rhs_tokens <- .dsem_expand_mplus_list(rhs_seg, symbol_order)
+      # Preserve `@val` and `*` modifiers on RHS tokens before `.dsem_parse_mplus_rhs_lag()`
+      rhs_raw_toks <- strsplit(trimws(rhs_seg), "\\s+")[[1L]]
+      rhs_tokens <- unlist(lapply(rhs_raw_toks, function(tk) {
+        mod_m <- regexpr("(\\*|@-?[0-9]*\\.?[0-9]+)$", tk)
+        if (mod_m > 0L) {
+          base_tk <- substr(tk, 1L, mod_m - 1L)
+          suf_tk <- substr(tk, mod_m, nchar(tk))
+          paste0(.dsem_expand_mplus_range(base_tk, symbol_order), suf_tk)
+        } else {
+          .dsem_expand_mplus_range(tk, symbol_order)
+        }
+      }), use.names = FALSE)
 
       pair_idx <- 0L
       for (lhs_tk in lhs_tokens) {
@@ -392,9 +459,11 @@
     mplus_time_cluster = mplus_time_cluster,
     mplus_tinterval = mplus_tinterval,
     mplus_categorical = mplus_categorical,
+    mplus_censored = mplus_censored,
     mplus_between = mplus_between,
     mplus_within = mplus_within,
     mplus_centering = mplus_centering,
+    mplus_centered_vars = if (length(mplus_centered_vars)) mplus_centered_vars else NULL,
     mplus_level_type = mplus_level_type,
     mplus_prior_mode = mplus_prior_mode
   )

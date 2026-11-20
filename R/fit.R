@@ -1,16 +1,17 @@
 #' Estimate a dynamic structural equation model
 #'
 #' Fits Bayesian dynamic structural equation models compiled by [dsem_model()]
-#' or specified directly via `lavaan`-style or Mplus Version 9 syntax.
-#' Supported model families include single-level (`N=1`) autoregressive and
-#' vector autoregressive (`VAR(p)`) models, residual dynamic models (`RDSEM`),
-#' binary and ordinal probit dynamic models, single- and multi-factor dynamic
-#' confirmatory factor / IRT models (`DAFS`, `WNFS`, `ARMA`), two-level
-#' location-scale DSEM with latent centering and random log residual variances,
-#' Mplus Version 9 three-level DSEM (`THREELEVEL` / `DSEM3`), and subject-by-time
+#' or specified directly via extended `lavaan` formulas or standard
+#' section-based SEM scripts. Supported model families include single-level
+#' (`N=1`) autoregressive and vector autoregressive (`VAR(p)`) models, residual
+#' dynamic models (`RDSEM`), binary/ordinal probit and Tobit censored dynamic
+#' models, single- and multi-factor dynamic confirmatory factor / IRT models
+#' (`DAFS`, `WNFS`, `ARMA`), two-level location-scale DSEM with latent
+#' centering, correlated within-level innovations, and random log residual
+#' variances, three-level DSEM (`THREELEVEL` / `DSEM3`), and subject-by-time
 #' cross-classified DSEM (`CROSSCLASSIFIED`).
 #'
-#' @param model A `DSEMmodel` object or model specification string.
+#' @param model A `DSEMmodel`, `DSEMspec`, or model specification string.
 #' @param data A data frame in long format.
 #' @param syntax,id,time,family,... Passed to [dsem_model()] when `model` is a
 #'   character string.
@@ -25,13 +26,15 @@
 #' @param engine Numerical backend: `"auto"` (uses compiled Rust when available),
 #'   `"rust"`, or transparent `"R"` reference implementation.
 #' @param control Named list of prior and estimation controls. Accepts
-#'   `prior_mode` (`"default"`, `"mplus"`, or `"penalized"` for Mplus Version 9
-#'   PSEM shrinkage), `beta_mean`, `beta_sd`, `sigma_shape`, `sigma_scale`,
-#'   `omega_df`, `omega_scale`, `coefficient_mean`, `coefficient_sd`,
-#'   `variance_shape`, `variance_scale`, and `ar_bound`.
+#'   `prior_mode` (`"default"`, `"mplus"` for diffuse priors, or `"penalized"`
+#'   for Bayesian Lasso PSEM shrinkage), `beta_mean`, `beta_sd`, `sigma_shape`,
+#'   `sigma_scale`, `omega_df`, `omega_scale`, `coefficient_mean`,
+#'   `coefficient_sd`, `variance_shape`, `variance_scale`, and `ar_bound`.
 #' @return A `DSEMfit` object with S3 methods [summary()], [coef()], [vcov()],
 #'   [confint()], [logLik()], [fitted()], [residuals()], [predict()], [plot()],
-#'   [dsem_standardize()], [dsem_dic()], [dsem_vif()], and [dsem_inspect()].
+#'   [dsem_standardize()], [dsem_dic()], [dsem_vif()], [dsem_r2()],
+#'   [dsem_partial_cor()], [dsem_hypothesis()], [dsem_irf()],
+#'   [dsem_fscomparison()], and [dsem_inspect()].
 #' @references
 #' Asparouhov, T., Hamaker, E. L., & Muthen, B. (2018). Dynamic structural
 #' equation models. *Structural Equation Modeling*, 25(3), 359-388.
@@ -55,7 +58,17 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
                  control = list()) {
   call <- match.call()
   engine <- match.arg(engine)
-  if (!inherits(model, "DSEMmodel")) {
+  if (inherits(model, "DSEMspec")) {
+    if (missing(chains)) chains <- model$chains
+    if (missing(iter)) iter <- model$iter
+    if (missing(warmup)) warmup <- model$warmup
+    if (missing(thin)) thin <- model$thin
+    if (missing(seed)) seed <- model$seed
+    if (missing(control) && !identical(model$prior_mode, "default")) {
+      control <- list(prior_mode = model$prior_mode)
+    }
+    model <- as_dsem_model(model)
+  } else if (!inherits(model, "DSEMmodel")) {
     model <- dsem_model(model, syntax = match.arg(syntax), id = id,
                         time = time, family = family, ...)
   }
@@ -100,11 +113,12 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
                                seed, compute, engine, control, call))
   }
 
-  # 5. Single-Level (N=1): check if general VAR(p)/RDSEM/Categorical/PSEM is needed
+  # 5. Single-Level (N=1): check if general VAR(p)/RDSEM/Categorical/Censored/PSEM is needed
   t <- model$terms
-  regs <- t[t$op == "~" & t$rhs != "1", , drop = FALSE]
+  regs <- .dsem_active_regs(t, model$term_meta, "within")
   lagged <- regs[regs$lag > 0L, , drop = FALSE]
   outcomes <- unique(regs$lhs)
+  exog_specs_chk <- .dsem_build_exog_specs(regs, outcomes)
   prior_mode <- if (!is.null(control$prior_mode)) {
     control$prior_mode
   } else if (!is.null(model$mplus_prior_mode)) {
@@ -116,9 +130,12 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
     nrow(lagged) == 1L &&
     lagged$lag[1L] == 1L &&
     lagged$lhs[1L] == lagged$rhs[1L] &&
+    !any(exog_specs_chk$lag > 0L) &&
+    nrow(regs) == sum(t$op == "~" & t$rhs != "1" & t$level == "within") &&
     !any(t$residual) &&
     model$family == "gaussian" &&
     !length(model$categorical) &&
+    !length(model$censored) &&
     identical(prior_mode, "default") &&
     is.null(model$tinterval)
 
@@ -245,27 +262,30 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
 .dsem_fit_var_n1 <- function(model, data, chains, iter, warmup, thin,
                              seed, compute, engine, control, call) {
   t <- model$terms
-  regs <- t[t$op == "~" & t$rhs != "1" & t$level == "within", , drop = FALSE]
+  regs <- .dsem_active_regs(t, model$term_meta, "within")
   outcomes <- unique(regs$lhs)
   d <- length(outcomes)
-  lags <- sort(unique(regs$lag[regs$lag > 0L]))
+  lags <- sort(unique(regs$lag[regs$lag > 0L & regs$rhs %in% outcomes]))
   if (!length(lags)) lags <- 1L
-  exog <- setdiff(unique(regs$rhs[regs$lag == 0L]), outcomes)
-  kx <- length(exog)
+  exog_specs <- .dsem_build_exog_specs(regs, outcomes)
+  exog <- exog_specs$key
+  exog_raw_vars <- unique(exog_specs$var)
+  kx <- nrow(exog_specs)
   cat_vars <- if (model$family %in% c("binary", "ordinal") && !length(model$categorical)) {
     outcomes
   } else {
     intersect(outcomes, model$categorical)
   }
 
-  .dsem_validate_data(data, NULL, model$time, unique(c(outcomes, exog)),
+  .dsem_validate_data(data, NULL, model$time, unique(c(outcomes, exog_raw_vars)),
                       allow_missing_vars = TRUE, categorical = cat_vars)
   ord <- if (is.null(model$time)) seq_len(nrow(data)) else {
     if (anyDuplicated(data[[model$time]])) .dsem_abort("The N=1 `time` index must be unique.")
     order(data[[model$time]])
   }
   df <- data[ord, , drop = FALSE]
-  if (nrow(df) < max(lags) + 5L) .dsem_abort("Too few observations for N=1 VAR(%d) estimation.", max(lags))
+  max_needed_lag <- max(c(lags, exog_specs$lag, 1L))
+  if (nrow(df) < max_needed_lag + 5L) .dsem_abort("Too few observations for N=1 VAR(%d) estimation.", max_needed_lag)
 
   y_mat <- matrix(NA_real_, nrow(df), d, dimnames = list(NULL, outcomes))
   outcome_types <- integer(d)
@@ -280,9 +300,11 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
       outcome_types[j] <- 0L
     }
   }
+  cens <- .dsem_resolve_censoring(model$censored, y_mat, outcomes, outcome_types)
+  outcome_types <- cens$outcome_types
+
   x_mat <- if (kx > 0L) {
-    xm <- as.matrix(df[, exog, drop = FALSE])
-    storage.mode(xm) <- "double"
+    xm <- .dsem_build_exog_matrix(df, exog_specs)
     for (k in seq_len(kx)) {
       if (anyNA(xm[, k])) xm[is.na(xm[, k]), k] <- mean(xm[, k], na.rm = TRUE)
     }
@@ -343,6 +365,7 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
 
   payload <- list(
     y = y_mat, x = x_mat, lags = as.integer(lags), outcome_types = as.integer(outcome_types),
+    censor_lo = cens$lo, censor_hi = cens$hi,
     res_dyn = res_dyn, pm_int = pm_int, prior = prior, engine = engine,
     iter = iter, warmup = warmup, thin = thin, master_seed = seed,
     model_hash = model$hash, param_names = param_names
@@ -362,18 +385,28 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
   pd_val <- mean(vapply(chain_res, `[[`, numeric(1), "pd"))
   d_bar_val <- mean(vapply(chain_res, `[[`, numeric(1), "d_bar"))
 
+  status_lbl <- if (res_dyn) {
+    "validated-rdsem-n1"
+  } else if (any(outcome_types >= 2L)) {
+    "validated-probit-n1"
+  } else if (any(outcome_types < 0L)) {
+    "validated-censored-n1"
+  } else {
+    "validated-var-n1"
+  }
+
   out <- list(
     call = call, model = model, data = df,
     parameter_table = .dsem_parameter_table(model, estimates),
     draws = draws, estimates = estimates, diagnostics = diagnostics,
     fitted.values = fitted_out, residuals = obs_out - fitted_out,
     observed = obs_out, row_index = ord,
-    fit = list(log_lik = -0.5 * d_bar_val, dic = dic_val, pd = pd_val, d_bar = d_bar_val),
+    fit = .dsem_safe_fit_metrics(dic_val, pd_val, d_bar_val),
     prior = prior, sampler = list(iter = iter, warmup = warmup, thin = thin, chains = chains),
     elapsed = elapsed, master_seed = seed,
     chain_seeds = vapply(chain_ids, function(i) .dsem_stable_seed(seed, paste(model$hash, "chain", i)), integer(1)),
     compute = compute, engine = engine, versions = .dsem_version_manifest(),
-    status = if (res_dyn) "validated-rdsem-n1" else if (any(outcome_types >= 2L)) "validated-probit-n1" else "validated-var-n1"
+    status = status_lbl
   )
   class(out) <- c("DSEMfit", "list")
   out
@@ -389,7 +422,10 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
   if (payload$engine == "rust" && .dsem_rust_available()) {
     dims <- as.integer(c(n_time, d, kx, as.integer(payload$res_dyn), payload$pm_int,
                          payload$iter, payload$warmup, payload$thin, c_seed))
-    hyper <- as.double(c(payload$prior$beta_sd, payload$prior$sigma_shape, payload$prior$sigma_scale))
+    hyper <- as.double(c(
+      payload$prior$beta_sd, payload$prior$sigma_shape, payload$prior$sigma_scale,
+      payload$censor_lo, payload$censor_hi
+    ))
     raw <- dsem_rust_var_n1(as.double(payload$y), as.double(payload$x),
                             payload$lags, payload$outcome_types, dims, hyper)
     dr <- matrix(raw$draws, nrow = n_keep, ncol = raw$param_count,

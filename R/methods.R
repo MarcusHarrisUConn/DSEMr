@@ -11,9 +11,14 @@
 dsem_inspect <- function(object, what = c("model", "terms", "estimates", "draws",
                                           "diagnostics", "compute", "versions", "fit",
                                           "random_effects", "random_effects_summary",
-                                          "random_effect_draws", "latent_states",
-                                          "latent_draws", "prior", "sampler",
-                                          "identification", "standardized", "vif")) {
+                                          "random_effect_draws",
+                                          "l2_random_effects", "l2_random_effects_summary",
+                                          "l2_random_effect_draws",
+                                          "time_effects", "time_effects_summary",
+                                          "time_effect_draws",
+                                          "latent_states", "latent_draws",
+                                          "prior", "sampler", "identification",
+                                          "standardized", "r2", "vif", "partial_cor")) {
   what <- match.arg(what)
   if (inherits(object, "DSEMmodel")) {
     if (what == "model") return(object)
@@ -24,7 +29,9 @@ dsem_inspect <- function(object, what = c("model", "terms", "estimates", "draws"
   if (what == "model") return(object$model)
   if (what == "terms") return(object$model$terms)
   if (what == "standardized") return(dsem_standardize(object, type = "stdyx"))
+  if (what == "r2") return(dsem_r2(object))
   if (what == "vif") return(dsem_vif(object))
+  if (what == "partial_cor") return(dsem_partial_cor(object))
   if (is.null(object[[what]])) .dsem_abort("`%s` is not available for this fitted model.", what)
   object[[what]]
 }
@@ -36,21 +43,35 @@ print.DSEMfit <- function(x, ...) {
       " retained draws/chain:", dim(x$draws)[1L], "\n")
   if (!is.null(x$fit$dic) && is.finite(x$fit$dic)) {
     cat(" DIC:", round(x$fit$dic, 3), " pD:", round(x$fit$pd, 3), "\n")
+  } else {
+    cat(" DIC: NA (categorical / probit model)\n")
   }
   cols <- intersect(c("parameter", "mean", "sd", "q50", "q2.5", "q97.5", "rhat", "ess"),
                     names(x$estimates))
-  print(x$estimates[, cols, drop = FALSE], row.names = FALSE)
+  tab <- x$estimates[, cols, drop = FALSE]
+  if (all(c("q2.5", "q97.5") %in% names(tab))) {
+    tab$sig <- ifelse(tab$q2.5 > 0 | tab$q97.5 < 0, "*", "")
+  }
+  print(tab, row.names = FALSE)
   invisible(x)
 }
 
 #' @exportS3Method base::summary
-summary.DSEMfit <- function(object, standardized = FALSE, ...) {
+summary.DSEMfit <- function(object, standardized = FALSE, r2 = FALSE,
+                            point = c("mean", "median"), ...) {
+  point <- match.arg(point)
+  est <- object$estimates
+  if (all(c("q2.5", "q97.5") %in% names(est))) {
+    est$sig <- ifelse(est$q2.5 > 0 | est$q97.5 < 0, "*", "")
+  }
   out <- list(
     call = object$call,
-    estimates = object$estimates,
+    estimates = est,
+    point = point,
     fit = object$fit,
     diagnostics = object$diagnostics,
     standardized = if (isTRUE(standardized)) dsem_standardize(object, "stdyx") else NULL,
+    r2 = if (isTRUE(r2) || isTRUE(standardized)) dsem_r2(object) else NULL,
     engine = object$engine,
     elapsed = object$elapsed,
     status = object$status,
@@ -61,25 +82,44 @@ summary.DSEMfit <- function(object, standardized = FALSE, ...) {
 }
 
 #' @exportS3Method base::print
-print.summary.DSEMfit <- function(x, ...) {
+print.summary.DSEMfit <- function(x, digits = 3L, ...) {
   cat("DSEMr Bayesian Dynamic Structural Equation Model\n")
   cat("Hierarchy:", x$level_type, " Status:", x$status,
       " Engine:", x$engine, " Elapsed:", round(x$elapsed, 3), "s\n")
   if (!is.null(x$fit$dic) && is.finite(x$fit$dic)) {
-    cat("Model Fit: DIC =", round(x$fit$dic, 3), "| pD =", round(x$fit$pd, 3), "\n")
+    cat("Model Fit: DIC =", round(x$fit$dic, 3), "| pD =", round(x$fit$pd, 3))
+    if (!is.null(x$fit$d_bar) && is.finite(x$fit$d_bar)) {
+      cat(" | D_bar =", round(x$fit$d_bar, 3))
+    }
+    cat("\n")
+  } else {
+    cat("Model Fit: DIC = NA (categorical / probit outcomes)\n")
   }
-  cat("\nUnstandardized Posterior Summaries:\n")
-  print(x$estimates, row.names = FALSE)
+  pt <- if (!is.null(x$point)) x$point else "mean"
+  cat(sprintf("\nUnstandardized Posterior Summaries (Point = %s):\n", toupper(pt)))
+  est <- x$estimates
+  if (identical(pt, "median") && "q50" %in% names(est)) {
+    first_cols <- intersect(c("parameter", "q50", "sd", "p_one_tailed", "q2.5", "q97.5", "sig", "rhat", "psr", "ess_bulk"), names(est))
+    est <- est[, first_cols, drop = FALSE]
+    names(est)[names(est) == "q50"] <- "estimate"
+  }
+  print(est, row.names = FALSE, digits = digits)
   if (!is.null(x$standardized)) {
     cat("\nStandardized Estimates (STDYX):\n")
-    print(x$standardized, row.names = FALSE)
+    print(x$standardized, row.names = FALSE, digits = digits)
+  }
+  if (!is.null(x$r2) && nrow(x$r2) > 0L) {
+    cat("\nBayesian R-Square:\n")
+    print(x$r2, row.names = FALSE, digits = digits)
   }
   invisible(x)
 }
 
 #' @exportS3Method stats::coef
-coef.DSEMfit <- function(object, ...) {
-  stats::setNames(object$estimates$mean, object$estimates$parameter)
+coef.DSEMfit <- function(object, point = c("mean", "median"), ...) {
+  point <- match.arg(point)
+  col_nm <- if (point == "median" && "q50" %in% names(object$estimates)) "q50" else "mean"
+  stats::setNames(object$estimates[[col_nm]], object$estimates$parameter)
 }
 
 #' @exportS3Method stats::vcov
@@ -128,9 +168,9 @@ predict.DSEMfit <- function(object, newdata = NULL, horizon = 0L, ...) {
   horizon <- .dsem_integer(horizon, "horizon", 0)
   if (is.null(newdata) && horizon == 0L) return(object$fitted.values)
   cf <- stats::coef(object)
-  ar_idx <- grep("^(lag1_|ar1_|mean_s|mean_lag1_)", names(cf))
+  ar_idx <- grep("^(lag1_|ar1_|mean_s|mean_lag1_|fixed_s|fixed_lag1_)", names(cf))
   phi <- if (length(ar_idx)) cf[ar_idx[1L]] else 0
-  int_idx <- grep("^(\\(Intercept\\)|intercept_|mean_)", names(cf))
+  int_idx <- grep("^(\\(Intercept\\)|intercept_|mean_|fixed_)", names(cf))
   mu <- if (length(int_idx)) cf[int_idx[1L]] else 0
 
   if (horizon > 0L) {
@@ -141,7 +181,7 @@ predict.DSEMfit <- function(object, newdata = NULL, horizon = 0L, ...) {
     }
     fc <- numeric(horizon)
     cur <- last_y
-    is_lat_cent <- any(grepl("^mean_", names(cf)))
+    is_lat_cent <- any(grepl("^(mean_|fixed_)", names(cf)))
     for (h in seq_len(horizon)) {
       cur <- if (is_lat_cent) mu + phi * (cur - mu) else mu + phi * cur
       fc[h] <- cur
@@ -156,33 +196,51 @@ predict.DSEMfit <- function(object, newdata = NULL, horizon = 0L, ...) {
   yv <- as.double(newdata[[out_nm]])
   n_new <- length(yv)
   if (n_new < 2L) return(rep(mu, n_new))
-  is_lat_cent <- any(grepl("^mean_", names(cf)))
+  is_lat_cent <- any(grepl("^(mean_|fixed_)", names(cf)))
   pred <- if (is_lat_cent) mu + phi * (yv[-n_new] - mu) else mu + phi * yv[-n_new]
   c(mu, pred)
 }
 
 #' @exportS3Method graphics::plot
-plot.DSEMfit <- function(x, type = c("trace", "density", "acf", "intervals", "latent"),
+plot.DSEMfit <- function(x, type = c("trace", "density", "acf", "intervals", "latent", "diagram"),
                          parameter = NULL, ...) {
   type <- match.arg(type)
+  if (type == "diagram") {
+    return(dsem_diagram(x, format = "plot", ...))
+  }
   if (type == "latent") {
     if (is.null(x$latent_states)) .dsem_abort("Latent state summaries are not available for this model.")
     ls_df <- x$latent_states
     graphics::plot(ls_df$time, ls_df$mean, type = "l", lwd = 2,
                    ylim = range(c(ls_df$q2.5, ls_df$q97.5), na.rm = TRUE),
                    xlab = "Time", ylab = "Latent factor score", main = "Posterior Latent Trajectory", ...)
-    graphics::lines(ls_df$time, ls_df$q2.5, lty = 2)
-    graphics::lines(ls_df$time, ls_df$q97.5, lty = 2)
+    graphics::polygon(
+      c(ls_df$time, rev(ls_df$time)),
+      c(ls_df$q2.5, rev(ls_df$q97.5)),
+      col = grDevices::adjustcolor("#2563eb", alpha.f = 0.18),
+      border = NA
+    )
+    graphics::lines(ls_df$time, ls_df$mean, lwd = 2, col = "#1d4ed8")
+    graphics::lines(ls_df$time, ls_df$q2.5, lty = 2, col = "#64748b")
+    graphics::lines(ls_df$time, ls_df$q97.5, lty = 2, col = "#64748b")
     return(invisible(x))
   }
   if (type == "intervals") {
     est <- x$estimates
     k <- nrow(est)
-    graphics::plot(est$mean, seq_len(k), xlim = range(c(est$q2.5, est$q97.5), na.rm = TRUE),
-                   yaxt = "n", xlab = "Estimate (95% CrI)", ylab = "", main = "Posterior Parameter Intervals", pch = 19, ...)
-    graphics::axis(2, at = seq_len(k), labels = est$parameter, las = 1)
-    graphics::segments(est$q2.5, seq_len(k), est$q97.5, seq_len(k), lwd = 2)
-    graphics::abline(v = 0, lty = 3)
+    old_par <- graphics::par(no.readonly = TRUE)
+    on.exit(graphics::par(old_par), add = TRUE)
+    max_chars <- max(nchar(est$parameter), 6L)
+    left_mar <- min(max(4.5, max_chars * 0.48 + 1.2), 14)
+    graphics::par(mar = c(4.5, left_mar, 3, 1.5))
+    sig <- est$q2.5 > 0 | est$q97.5 < 0
+    cols <- ifelse(sig, "#1d4ed8", "#64748b")
+    graphics::plot(est$mean, seq_len(k), xlim = range(c(0, est$q2.5, est$q97.5), na.rm = TRUE),
+                   yaxt = "n", xlab = "Posterior Estimate (95% CrI)", ylab = "",
+                   main = "Posterior Parameter Intervals", pch = 19, col = cols, ...)
+    graphics::axis(2, at = seq_len(k), labels = est$parameter, las = 1, cex.axis = 0.85)
+    graphics::segments(est$q2.5, seq_len(k), est$q97.5, seq_len(k), lwd = 2, col = cols)
+    graphics::abline(v = 0, lty = 3, col = "#94a3b8")
     return(invisible(x))
   }
   params <- dimnames(x$draws)$parameter

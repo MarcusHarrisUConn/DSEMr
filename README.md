@@ -1,22 +1,23 @@
 # DSEMr
 
-`DSEMr` is an open-source R package for Bayesian **Dynamic Structural Equation Modeling (DSEM)** built around a unified canonical model representation, dual `lavaan`-extended and clean-room **Mplus Version 9** compatibility frontends, and a compiled offline-vendored **Rust** numerical backend (`extendr`).
+`DSEMr` is an open-source R package for Bayesian **Dynamic Structural Equation Modeling (DSEM)** of intensive longitudinal and time-series data. It pairs a unified canonical model representation — supporting both extended `lavaan` formulas and standard section-based SEM scripts — with a compiled, offline-vendored **Rust** numerical engine (`extendr`) and a transparent R reference implementation.
 
-## Capabilities & Mplus Version 9 Parity
+## Supported DSEM Model Families
 
-| Model family | Mplus reference | Compiler | Rust + R Estimator | Status |
+| Model family | Methodological foundation | Compiler | Rust + R Estimator | Status |
 |---|---|---:|---:|---|
-| N=1 Gaussian AR(p) / VAR(p) & covariates | 6.23–6.25 | Yes | Yes | Validated |
-| N=1 Dynamic CFA — DAFS & WNFS | 6.26, 6.26b | Yes | Yes | Validated |
-| N=1 Binary & Ordinal Probit DSEM / Dynamic IRT | 6.27 | Yes | Yes | Validated |
-| N=1 Multivariate Cross-Lagged Dynamic SEM | 6.28 | Yes | Yes | Validated |
-| Two-level Location-Scale DSEM (latent centering, random slopes & `logv`, `%BETWEEN%` predictors & distal outcomes) | 9.30–9.32, 9.37 | Yes | Yes | Validated |
-| Two-level Single-Indicator Measurement Error & ARMA(1,1) | 9.33, 9.33b | Yes | Yes | Validated |
-| Two-level Dynamic CFA, Dynamic IRT (cross-level invariance), & Multi-Factor Cross-Lagged SEM | 9.34–9.36 | Yes | Yes | Validated |
-| Residual DSEM (`RDSEM`: `y^ ON y^1` / `residual()`) | Asparouhov & Muthén (2020) | Yes | Yes | Validated |
-| Cross-Classified DSEM (`TYPE = CROSSCLASSIFIED RANDOM`) | 9.38–9.40 | Yes | Yes | Validated |
-| **Three-Level DSEM (`TYPE = THREELEVEL RANDOM` / DSEM3)** with 3-level latent decomposition | **Mplus Version 9** | Yes | Yes | Validated |
-| **Diagnostics & Post-Estimation:** `TINTERVAL` grid alignment, `DIC`/`pD`, `STDYX`/`STDY`/`STD` (cluster-wise within-person), `VIF`, `PSEM` shrinkage priors, split-Rhat, PSR (`TECH8`), bulk/tail ESS, MCSE, one-tailed p-values | **Mplus Version 8 & 9** | Yes | Yes | Validated |
+| N=1 Gaussian AR(p) / VAR(p), sparse lags & lagged covariates | Shumway & Stoffer (2011) | Yes | Yes | Validated |
+| N=1 Dynamic CFA — Direct Autoregressive (DAFS) & White-Noise Factor Score (WNFS) | Molenaar (1985); Zhang & Nesselroade (2007) | Yes | Yes | Validated |
+| N=1 Binary & Ordinal Probit DSEM / Dynamic IRT | Albert & Chib (1993); Asparouhov et al. (2018) | Yes | Yes | Validated |
+| N=1 & Two-Level Tobit Censored DSEM (floor/ceiling/interval censoring) | Bayesian Tobit data augmentation | Yes | Yes | Validated |
+| N=1 Multivariate Cross-Lagged Multi-Factor Dynamic SEM | Asparouhov, Hamaker, & Muthén (2018) | Yes | Yes | Validated |
+| Two-Level Location-Scale DSEM (latent centering, random slopes & `logv`, between predictors, distal outcomes, short-T stationary MH) | Asparouhov et al. (2018); McNeish & Hamaker (2020); Asparouhov (2026) | Yes | Yes | Validated |
+| Two-Level Multivariate Cross-Lagged VAR with Correlated Within Innovations ($\Sigma_W$) | Schuurman et al. (2016); Asparouhov et al. (2018) | Yes | Yes | Validated |
+| Two-Level Single-Indicator Measurement Error, ARMA(1,1), Dynamic CFA, Dynamic IRT (cross-level invariance), & Multi-Factor Cross-Lagged SEM | Asparouhov, Hamaker, & Muthén (2018) | Yes | Yes | Validated |
+| Residual DSEM (`RDSEM`: `residual(lag(y, 1))` / `y^ ON y^1`) | Asparouhov & Muthén (2020) | Yes | Yes | Validated |
+| Cross-Classified DSEM (`TYPE = CROSSCLASSIFIED RANDOM`) with selective subject/occasion random slopes & time-level predictors | Asparouhov, Hamaker, & Muthén (2018) | Yes | Yes | Validated |
+| Three-Level DSEM (`TYPE = THREELEVEL RANDOM` / DSEM3) with 3-level latent decomposition & simultaneous two-level block Gibbs | Asparouhov & Muthén (2026) | Yes | Yes | Validated |
+| **Diagnostics & Post-Estimation:** `TINTERVAL` grid alignment, `DIC`/`pD`, cluster-averaged & cluster-specific `STDYX`/`STDY`/`STD`, Bayesian $R^2$, posterior partial correlations, derived hypothesis & Wald tests, IRFs, cluster rankings, `VIF`, `PSEM` Lasso priors, split-$\hat{R}$, PSR, bulk/tail ESS, MCSE, one-tailed $p$-values | Gelman et al. (2013); Schuurman et al. (2016); Asparouhov & Muthén (2025) | Yes | Yes | Validated |
 
 ## Installation
 
@@ -28,33 +29,28 @@
 remotes::install_github("MarcusHarrisUConn/DSEMr")
 ```
 
-## Quick examples
+## Quick Examples
 
-### Two-level location-scale DSEM with `TINTERVAL` and distal outcome (Mplus 9.30)
+### Two-level location-scale DSEM with `TINTERVAL` and distal outcome
 
 ```r
 library(DSEMr)
 
-m_2l <- mplus_to_dsem("
-  VARIABLE:
-    CLUSTER = subject;
-    BETWEEN = z w;
-    TINTERVAL = time(1);
-  ANALYSIS:
-    TYPE = TWOLEVEL RANDOM;
-    ESTIMATOR = BAYES;
-  MODEL:
-    %WITHIN%
-      s | y ON y&1;
-      logv | y;
-    %BETWEEN%
-      y s logv ON w;
-      y s logv WITH y s logv;
-      z ON y s logv;
-")
+m_2l <- dsem_model("
+  level: 1
+    s | y ~ lag(y, 1)
+    logv | y ~~ y
+  level: 2
+    y ~ w
+    s ~ w
+    logv ~ w
+    y ~~ s + logv
+    s ~~ logv
+    z ~ y + s + logv
+", id = "subject", time = "time", tinterval = 1)
 ```
 
-### Three-level DSEM (`DSEM3`, Mplus Version 9)
+### Three-level DSEM (`DSEM3`) with simultaneous block Gibbs
 
 ```r
 dat3 <- simulate_dsem(
@@ -64,17 +60,15 @@ dat3 <- simulate_dsem(
 )
 
 m_3l <- dsem_model("
-  VARIABLE: CLUSTER = person day;
-  ANALYSIS: TYPE = THREELEVEL RANDOM; ESTIMATOR = BAYES;
-  MODEL:
-    %WITHIN%
-      s | y ON y&1;
-      logv | y;
-    %BETWEEN day%
-      y;
-    %BETWEEN person%
-      y s logv WITH y s logv;
-", syntax = "mplus", time = "time")
+  level: 1
+    s | y ~ lag(y, 1)
+    logv | y ~~ y
+  level: 2
+    y ~~ y
+  level: 3
+    y ~~ s + logv
+    s ~~ logv
+", id = c("day", "person"), time = "time", level_type = "threelevel")
 
 fit3 <- dsem(m_3l, dat3, chains = 4, iter = 2000, warmup = 1000, seed = 4815)
 summary(fit3, standardized = TRUE)
@@ -83,16 +77,19 @@ dsem_dic(fit3)
 
 ## Public API
 
-- `dsem_model()` / `mplus_to_dsem()` — dual `lavaan`-extended and Mplus v9 syntax compiler
-- `dsem()` — Bayesian DSEM / RDSEM / DSEM3 / Dynamic CFA & IRT estimator
-- `dsem_tinterval()` — Mplus-compatible `TINTERVAL` irregular timestamp alignment
-- `dsem_standardize()` — posterior `STDYX`, `STDY`, and `STD` (including cluster-wise within-person standardization)
-- `dsem_dic()` — conditional Deviance Information Criterion (`DIC`, `pD`, `D_bar`)
-- `dsem_vif()` — Mplus Version 9 covariate collinearity Variance Inflation Factors
-- `simulate_dsem()` / `dsem_monte_carlo()` — deterministic simulation and Monte Carlo studies
-- `dsem_compute()` / `dsem_inspect()` — scheduler-aware parallelism and object inspection
-- Standard S3 methods: `summary()`, `coef()`, `vcov()`, `confint()`, `logLik()`, `fitted()`, `residuals()`, `predict()`, `plot()`
+- **Model Specification:** `dsem_model()`, `mplus_to_dsem()`, `dsem_spec()`, `as_dsem_model()` — extended `lavaan` formulas, section-based SEM script import, and declarative GUI-ready model specifications
+- **Estimation & Grid Alignment:** `dsem()`, `dsem_tinterval()` — compiled Rust Bayesian MCMC estimation and order-preserving time-interval alignment
+- **Standardization & Post-Estimation Analytics:**
+  - `dsem_standardize()` / `dsem_r2()` — posterior `STDYX`, `STDY`, `STD` (cluster-averaged and per-cluster via `cluster = TRUE`), and Within/Between Bayesian $R^2$
+  - `dsem_partial_cor()` — posterior partial and zero-order correlation networks across Between, Level-2/3, Occasion, and Within covariance blocks
+  - `dsem_hypothesis()` — derived parameter posteriors (indirect effects, contrasts, variance ratios) and joint multivariate Bayesian Wald tests
+  - `dsem_irf()` — orthogonalized and generalized Bayesian Impulse Response Functions with `plot()`
+  - `dsem_fscomparison()` — posterior cluster random-effect rankings, exceedance probabilities, and caterpillar plots
+- **Model Comparison & Diagnostics:** `dsem_dic()`, `dsem_compare()`, `anova()`, `dsem_vif()`, `dsem_inspect()`
+- **Publication Reporting & Reproducibility:** `dsem_table()` (APA 7th Ed. in `markdown`, `latex`, `html`, `data.frame`), `dsem_equations()` (LaTeX equations), `dsem_diagram()` (`plot`, vector `svg`, `mermaid`, `dot`), `dsem_code()`, `dsem_to_lavaan()`, `dsem_to_mplus()`
+- **Simulation & Parallelism:** `simulate_dsem()`, `dsem_monte_carlo()`, `dsem_compute()`
+- **Standard S3 Methods:** `summary()`, `coef()`, `vcov()`, `confint()`, `logLik()`, `anova()`, `fitted()`, `residuals()`, `predict()`, `plot()`
 
-## Clean-room policy & license
+## License
 
-`DSEMr` is an independent clean-room implementation based exclusively on published methodological papers and public documentation. Licensed under GPL (>= 3).
+`DSEMr` is an independent open-source implementation of published Dynamic Structural Equation Modeling methods, licensed under GPL (>= 3).

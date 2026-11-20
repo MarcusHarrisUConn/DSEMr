@@ -2,7 +2,7 @@ use crate::linalg::{
     chol_lower_jitter, eye, idx, mat_t_mul, mat_vec, quad_form, rinv_wishart, rmvnorm_precision,
     spd_invert, spd_logdet, symmetrize,
 };
-use crate::rng::Rng;
+use crate::rng::{log_std_norm_cdf, Rng};
 use std::f64::consts::PI;
 
 pub struct TwoLevelOutput {
@@ -35,7 +35,9 @@ pub fn mcmc_twolevel(
     latent_center_y: bool,
     latent_center_x: &[i32], // length kx: 1 if x_k is latently centered per cluster
     residual_dynamics: bool,
-    outcome_types: &[i32], // 0 = continuous, K >= 2 = K categories
+    outcome_types: &[i32], // 0 = cont, >= 2 = K-cat probit, -1/-2/-3 = Tobit censored
+    censor_lo: &[f64],     // length d
+    censor_hi: &[f64],     // length d
     prior_mode: i32,
     beta_sd: f64,
     omega_df_add: f64,
@@ -52,6 +54,9 @@ pub fn mcmc_twolevel(
     let n_lags = lags.len();
     let n_slopes_per_out = n_lags * d + kx;
     let is_cat: Vec<bool> = outcome_types.iter().map(|&k| k >= 2).collect();
+    let is_cens: Vec<bool> = outcome_types.iter().map(|&k| k < 0).collect();
+    let any_cat = is_cat.iter().any(|&b| b);
+    let any_cens = is_cens.iter().any(|&b| b);
 
     // Cluster row offsets
     let mut offsets = Vec::with_capacity(g_cnt + 1);
@@ -85,11 +90,19 @@ pub fn mcmc_twolevel(
             n_fixed_sig += 1;
         }
     }
+    // Use full unstructured d x d within innovation covariance Sigma_W for multivariate continuous models without random logv
+    let use_full_sigma_w = d > 1 && n_rand_logv == 0 && !any_cat && !any_cens;
+    let n_within_cov_params = if use_full_sigma_w {
+        d * (d + 1) / 2
+    } else {
+        n_fixed_sig
+    };
     let q_re = d + n_rand_slopes + n_rand_logv;
 
-    // Initialize y_work and missingness
+    // Initialize y_work, missingness, and censoring flags
     let mut y_work = y_in.to_vec();
     let mut miss_y = vec![false; n_obs * d];
+    let mut cens_flag = vec![0i8; n_obs * d];
     for j in 0..d {
         let mut s = 0.0;
         let mut c = 0usize;
@@ -103,12 +116,25 @@ pub fn mcmc_twolevel(
             }
         }
         let m = if c > 0 { s / c as f64 } else { 0.0 };
+        let lo_c = censor_lo.get(j).copied().unwrap_or(f64::NEG_INFINITY);
+        let hi_c = censor_hi.get(j).copied().unwrap_or(f64::INFINITY);
+        let ot = outcome_types[j];
         for r in 0..n_obs {
-            if miss_y[idx(r, j, n_obs)] {
-                y_work[idx(r, j, n_obs)] = if is_cat[j] { 0.0 } else { m };
+            let cell = idx(r, j, n_obs);
+            if miss_y[cell] {
+                y_work[cell] = if is_cat[j] { 0.0 } else { m };
             } else if is_cat[j] {
                 let kc = outcome_types[j].max(2) as f64;
-                y_work[idx(r, j, n_obs)] = ((y_in[idx(r, j, n_obs)] + 0.5) / kc - 0.5) * 2.0;
+                y_work[cell] = ((y_in[cell] + 0.5) / kc - 0.5) * 2.0;
+            } else if ot < 0 {
+                let v = y_in[cell];
+                if (ot == -1 || ot == -3) && lo_c.is_finite() && v <= lo_c + 1e-12 {
+                    cens_flag[cell] = -1;
+                    y_work[cell] = lo_c - 0.25;
+                } else if (ot == -2 || ot == -3) && hi_c.is_finite() && v >= hi_c - 1e-12 {
+                    cens_flag[cell] = 1;
+                    y_work[cell] = hi_c + 0.25;
+                }
             }
         }
     }
@@ -169,20 +195,19 @@ pub fn mcmc_twolevel(
     let mut omega_b = eye(q_re, 0.1);
     let mut fixed_slopes = vec![0.0; n_fixed_slopes];
     let mut fixed_sigma2 = vec![1.0; d];
+    let mut sigma_w = eye(d, 1.0);
 
     // Distal outcome parameters: for each m in 0..kz, predictors [1, selected theta, selected w]
     let p_z = 1 + q_re + kw;
     let mut beta_z: Vec<f64> = vec![0.0_f64; p_z * kz];
     let mut sigma2_z: Vec<f64> = vec![0.5_f64; kz];
-    let mut mh_step_logv = vec![0.25; g_cnt * n_rand_logv.max(1)];
-    let mut mh_accept_logv = vec![0usize; g_cnt * n_rand_logv.max(1)];
 
     // Count population parameters reported in draws:
     // 1. gamma_b intercepts (q_re)
     // 2. active gamma_b slopes on w
     // 3. fixed within slopes (n_fixed_slopes)
     // 4. lower triangle of omega_b (q_re*(q_re+1)/2)
-    // 5. fixed within sigma2 (for continuous outcomes without random logv)
+    // 5. fixed within sigma2 (or lower triangle of full Sigma_W when use_full_sigma_w)
     // 6. distal z intercepts, active z slopes on theta & w, and sigma2_z
     let n_re_w_active: usize = re_on_w_mask.iter().filter(|&&v| v != 0).count();
     let n_z_re_active: usize = z_on_re_mask.iter().filter(|&&v| v != 0).count();
@@ -192,7 +217,7 @@ pub fn mcmc_twolevel(
         + n_re_w_active
         + n_fixed_slopes
         + n_omega_cov
-        + n_fixed_sig
+        + n_within_cov_params
         + kz
         + n_z_re_active
         + n_z_w_active
@@ -208,10 +233,16 @@ pub fn mcmc_twolevel(
     let mut deviance_sum = 0.0;
     let mut pred_bar_accum = vec![0.0; n_obs * d];
     let mut sig_bar_accum = vec![0.0; g_cnt * d];
+    let mut sigma_w_accum = vec![0.0; d * d];
     let mut keep_pos = 0usize;
 
     for step in 1..=iter {
         let omega_inv = spd_invert(&omega_b, q_re);
+        let sigma_w_inv = if use_full_sigma_w {
+            spd_invert(&sigma_w, d)
+        } else {
+            Vec::new()
+        };
 
         // Optional latent centering update for exogenous covariates x_k
         for k in 0..kx {
@@ -308,12 +339,18 @@ pub fn mcmc_twolevel(
                 }
             }
 
-            // 1a. Probit / missing data imputation inside cluster g
+            // 1a. Probit / Tobit censored / missing data imputation inside cluster g
             for t_loc in 0..tg {
                 let r_abs = st + t_loc;
                 for j in 0..d {
+                    let cell = idx(r_abs, j, n_obs);
+                    let is_m = miss_y[cell];
+                    let c_fl = cens_flag[cell];
+                    if !is_cat[j] && !is_m && c_fl == 0 {
+                        continue;
+                    }
                     let mu_gj = theta[idx(g, j, g_cnt)];
-                    let pred = cluster_cell_mean(
+                    let mut pred = cluster_cell_mean(
                         &y_work,
                         x_in,
                         &x_between,
@@ -335,23 +372,15 @@ pub fn mcmc_twolevel(
                         residual_dynamics,
                         n_obs,
                     );
-                    if is_cat[j] && !miss_y[idx(r_abs, j, n_obs)] {
-                        let obs_c = y_in[idx(r_abs, j, n_obs)].round() as i32;
-                        let (lo, hi) = if obs_c <= 0 {
-                            (f64::NEG_INFINITY, 0.0)
-                        } else {
-                            (0.0, f64::INFINITY)
-                        };
-                        y_work[idx(r_abs, j, n_obs)] = rng.rtruncnorm(pred, 1.0, lo, hi);
-                    } else if miss_y[idx(r_abs, j, n_obs)] {
-                        let mut prec = 1.0 / sig2_g[j].max(1e-6);
-                        let mut info = pred * prec;
-                        if !residual_dynamics && n_lags >= 1 {
-                            for (l_idx, &lag_v) in lags.iter().enumerate() {
-                                let t_f = t_loc + lag_v;
-                                if t_f >= max_lag && t_f < tg {
-                                    let phi = slopes_g[idx(l_idx * d + j, j, n_slopes_per_out)];
-                                    let pred_f = cluster_cell_mean(
+                    let cond_var_j = if is_cat[j] {
+                        1.0
+                    } else if use_full_sigma_w && t_loc >= max_lag {
+                        let s_jj = sigma_w_inv[idx(j, j, d)].max(1e-8);
+                        for k in 0..d {
+                            if k != j {
+                                let s_jk = sigma_w_inv[idx(j, k, d)];
+                                if s_jk.abs() > 1e-14 {
+                                    let pred_k = cluster_cell_mean(
                                         &y_work,
                                         x_in,
                                         &x_between,
@@ -359,29 +388,92 @@ pub fn mcmc_twolevel(
                                         g,
                                         g_cnt,
                                         st,
-                                        t_f,
-                                        j,
+                                        t_loc,
+                                        k,
                                         d,
                                         kx,
                                         lags,
                                         max_lag,
-                                        mu_gj,
+                                        theta[idx(g, k, g_cnt)],
                                         &theta,
                                         &slopes_g,
                                         n_slopes_per_out,
                                         latent_center_y,
-                                        false,
+                                        residual_dynamics,
                                         n_obs,
                                     );
-                                    let rem = y_work[idx(st + t_f, j, n_obs)]
-                                        - (pred_f - phi * y_work[idx(r_abs, j, n_obs)]);
-                                    prec += (phi * phi) / sig2_g[j].max(1e-6);
-                                    info += phi * rem / sig2_g[j].max(1e-6);
+                                    pred -= (s_jk / s_jj) * (y_work[idx(r_abs, k, n_obs)] - pred_k);
                                 }
                             }
                         }
-                        y_work[idx(r_abs, j, n_obs)] =
-                            info / prec + (1.0 / prec).sqrt() * rng.rnorm();
+                        (1.0 / s_jj).clamp(1e-6, 100.0)
+                    } else {
+                        sig2_g[j].max(1e-6)
+                    };
+
+                    if is_cat[j] && !is_m {
+                        let obs_c = y_in[cell].round() as i32;
+                        let (lo, hi) = if obs_c <= 0 {
+                            (f64::NEG_INFINITY, 0.0)
+                        } else {
+                            (0.0, f64::INFINITY)
+                        };
+                        y_work[cell] = rng.rtruncnorm(pred, 1.0, lo, hi);
+                    } else if is_m || c_fl != 0 {
+                        let mut prec = 1.0 / cond_var_j;
+                        let mut info = pred * prec;
+                        if !residual_dynamics && n_lags >= 1 {
+                            for (l_idx, &lag_v) in lags.iter().enumerate() {
+                                let t_f = t_loc + lag_v;
+                                if t_f >= max_lag && t_f < tg {
+                                    for m_out in 0..d {
+                                        let phi =
+                                            slopes_g[idx(l_idx * d + j, m_out, n_slopes_per_out)];
+                                        if phi.abs() > 1e-12 {
+                                            let s2_m = sig2_g[m_out].max(1e-6);
+                                            let pred_f = cluster_cell_mean(
+                                                &y_work,
+                                                x_in,
+                                                &x_between,
+                                                latent_center_x,
+                                                g,
+                                                g_cnt,
+                                                st,
+                                                t_f,
+                                                m_out,
+                                                d,
+                                                kx,
+                                                lags,
+                                                max_lag,
+                                                theta[idx(g, m_out, g_cnt)],
+                                                &theta,
+                                                &slopes_g,
+                                                n_slopes_per_out,
+                                                latent_center_y,
+                                                false,
+                                                n_obs,
+                                            );
+                                            let rem = y_work[idx(st + t_f, m_out, n_obs)]
+                                                - (pred_f - phi * y_work[cell]);
+                                            prec += (phi * phi) / s2_m;
+                                            info += phi * rem / s2_m;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let post_mean = info / prec.max(1e-8);
+                        let post_sd = (1.0 / prec.max(1e-8)).sqrt();
+                        if c_fl != 0 {
+                            let (lo, hi) = if c_fl < 0 {
+                                (f64::NEG_INFINITY, censor_lo.get(j).copied().unwrap_or(0.0))
+                            } else {
+                                (censor_hi.get(j).copied().unwrap_or(0.0), f64::INFINITY)
+                            };
+                            y_work[cell] = rng.rtruncnorm(post_mean, post_sd, lo, hi);
+                        } else {
+                            y_work[cell] = post_mean + post_sd * rng.rnorm();
+                        }
                     }
                 }
             }
@@ -456,72 +548,147 @@ pub fn mcmc_twolevel(
                     }
                     b_mu[c] = rhs;
                 }
-                for j in 0..d {
-                    let s2 = sig2_g[j].max(1e-6);
-                    // Stationary initial observation contribution if latent_center_y && d == 1 && n_lags == 1
-                    if latent_center_y && !residual_dynamics && n_lags == 1 && d == 1 {
-                        let phi = slopes_g[0].clamp(-0.98, 0.98);
-                        let w0 = (1.0 - phi * phi).max(0.02) / s2;
-                        p_mu[0] += w0;
-                        b_mu[0] += w0 * y_work[idx(st, 0, n_obs)];
+                if use_full_sigma_w {
+                    // Exact multivariate joint intercept update: e_{gt} = r_{gt} - C_g * mu_g, e ~ N(0, Sigma_W)
+                    let mut c_mat = eye(d, 1.0);
+                    if latent_center_y || residual_dynamics {
+                        for j in 0..d {
+                            for (l_idx, _) in lags.iter().enumerate() {
+                                for m_col in 0..d {
+                                    let phi = slopes_g[idx(l_idx * d + m_col, j, n_slopes_per_out)];
+                                    c_mat[idx(j, m_col, d)] -= phi;
+                                }
+                            }
+                        }
                     }
+                    let mut r_sum = vec![0.0; d];
                     for r_loc in 0..n_eff_g {
                         let t_loc = r_loc + max_lag;
-                        // Coefficient on mu_{g,j} in y_{g,t,j}:
-                        // Under latent centering (!residual_dynamics): (1 - sum_l phi_{self,l}) * mu_j
-                        // Under RDSEM or conditional intercept: 1.0 * mu_j (with cross-effects accounted)
-                        let mut c_mult = 1.0;
-                        let mut rem = y_work[idx(st + t_loc, j, n_obs)];
-                        for k_x in 0..kx {
-                            let x_val = if latent_center_x[k_x] != 0 {
-                                x_in[idx(st + t_loc, k_x, n_obs)] - x_between[idx(g, k_x, g_cnt)]
-                            } else {
-                                x_in[idx(st + t_loc, k_x, n_obs)]
-                            };
-                            rem -= slopes_g[idx(n_lags * d + k_x, j, n_slopes_per_out)] * x_val;
-                        }
-                        if !residual_dynamics {
+                        for j in 0..d {
+                            let mut rem = y_work[idx(st + t_loc, j, n_obs)];
+                            for k_x in 0..kx {
+                                let x_val = if latent_center_x[k_x] != 0 {
+                                    x_in[idx(st + t_loc, k_x, n_obs)]
+                                        - x_between[idx(g, k_x, g_cnt)]
+                                } else {
+                                    x_in[idx(st + t_loc, k_x, n_obs)]
+                                };
+                                rem -= slopes_g[idx(n_lags * d + k_x, j, n_slopes_per_out)] * x_val;
+                            }
                             for (l_idx, &lag_v) in lags.iter().enumerate() {
                                 for m_col in 0..d {
                                     let phi = slopes_g[idx(l_idx * d + m_col, j, n_slopes_per_out)];
-                                    let y_lag = y_work[idx(st + t_loc - lag_v, m_col, n_obs)];
-                                    rem -= phi * y_lag;
-                                    if latent_center_y {
+                                    let mut y_l = y_work[idx(st + t_loc - lag_v, m_col, n_obs)];
+                                    if residual_dynamics {
+                                        for k_x in 0..kx {
+                                            let x_l = if latent_center_x[k_x] != 0 {
+                                                x_in[idx(st + t_loc - lag_v, k_x, n_obs)]
+                                                    - x_between[idx(g, k_x, g_cnt)]
+                                            } else {
+                                                x_in[idx(st + t_loc - lag_v, k_x, n_obs)]
+                                            };
+                                            y_l -= slopes_g
+                                                [idx(n_lags * d + k_x, m_col, n_slopes_per_out)]
+                                                * x_l;
+                                        }
+                                    }
+                                    rem -= phi * y_l;
+                                }
+                            }
+                            r_sum[j] += rem;
+                        }
+                    }
+                    // p_mu += n_eff_g * C_g^T Sigma_W^{-1} C_g, b_mu += C_g^T Sigma_W^{-1} r_sum
+                    let mut sw_c = vec![0.0; d * d];
+                    for col in 0..d {
+                        for row in 0..d {
+                            let mut s = 0.0;
+                            for k in 0..d {
+                                s += sigma_w_inv[idx(row, k, d)] * c_mat[idx(k, col, d)];
+                            }
+                            sw_c[idx(row, col, d)] = s;
+                        }
+                    }
+                    let ct_sw_c = mat_t_mul(&c_mat, &sw_c, d, d, d);
+                    let sw_r = mat_vec(&sigma_w_inv, &r_sum, d, d);
+                    let ct_sw_r = mat_t_mul(&c_mat, &sw_r, d, d, 1);
+                    let nf = n_eff_g as f64;
+                    for c in 0..d {
+                        b_mu[c] += ct_sw_r[c];
+                        for r in 0..d {
+                            p_mu[idx(r, c, d)] += nf * ct_sw_c[idx(r, c, d)];
+                        }
+                    }
+                } else {
+                    for j in 0..d {
+                        let s2 = sig2_g[j].max(1e-6);
+                        // Stationary initial observation contribution for pure univariate AR(1) (kx == 0)
+                        if latent_center_y && !residual_dynamics && n_lags == 1 && d == 1 && kx == 0
+                        {
+                            let phi = slopes_g[0].clamp(-0.98, 0.98);
+                            let w0 = (1.0 - phi * phi).max(0.02) / s2;
+                            p_mu[0] += w0;
+                            b_mu[0] += w0 * y_work[idx(st, 0, n_obs)];
+                        }
+                        for r_loc in 0..n_eff_g {
+                            let t_loc = r_loc + max_lag;
+                            let mut c_mult = 1.0;
+                            let mut rem = y_work[idx(st + t_loc, j, n_obs)];
+                            for k_x in 0..kx {
+                                let x_val = if latent_center_x[k_x] != 0 {
+                                    x_in[idx(st + t_loc, k_x, n_obs)]
+                                        - x_between[idx(g, k_x, g_cnt)]
+                                } else {
+                                    x_in[idx(st + t_loc, k_x, n_obs)]
+                                };
+                                rem -= slopes_g[idx(n_lags * d + k_x, j, n_slopes_per_out)] * x_val;
+                            }
+                            if !residual_dynamics {
+                                for (l_idx, &lag_v) in lags.iter().enumerate() {
+                                    for m_col in 0..d {
+                                        let phi =
+                                            slopes_g[idx(l_idx * d + m_col, j, n_slopes_per_out)];
+                                        let y_lag = y_work[idx(st + t_loc - lag_v, m_col, n_obs)];
+                                        rem -= phi * y_lag;
+                                        if latent_center_y {
+                                            if m_col == j {
+                                                c_mult -= phi;
+                                            } else {
+                                                rem += phi * theta[idx(g, m_col, g_cnt)];
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                for (l_idx, &lag_v) in lags.iter().enumerate() {
+                                    for m_col in 0..d {
+                                        let phi =
+                                            slopes_g[idx(l_idx * d + m_col, j, n_slopes_per_out)];
+                                        let mut u_lag =
+                                            y_work[idx(st + t_loc - lag_v, m_col, n_obs)];
+                                        for k_x in 0..kx {
+                                            let x_l = if latent_center_x[k_x] != 0 {
+                                                x_in[idx(st + t_loc - lag_v, k_x, n_obs)]
+                                                    - x_between[idx(g, k_x, g_cnt)]
+                                            } else {
+                                                x_in[idx(st + t_loc - lag_v, k_x, n_obs)]
+                                            };
+                                            u_lag -= slopes_g
+                                                [idx(n_lags * d + k_x, m_col, n_slopes_per_out)]
+                                                * x_l;
+                                        }
                                         if m_col == j {
+                                            rem -= phi * u_lag;
                                             c_mult -= phi;
                                         } else {
-                                            rem += phi * theta[idx(g, m_col, g_cnt)];
+                                            rem -= phi * (u_lag - theta[idx(g, m_col, g_cnt)]);
                                         }
                                     }
                                 }
                             }
-                        } else {
-                            for (l_idx, &lag_v) in lags.iter().enumerate() {
-                                for m_col in 0..d {
-                                    let phi = slopes_g[idx(l_idx * d + m_col, j, n_slopes_per_out)];
-                                    let mut u_lag = y_work[idx(st + t_loc - lag_v, m_col, n_obs)];
-                                    for k_x in 0..kx {
-                                        let x_l = if latent_center_x[k_x] != 0 {
-                                            x_in[idx(st + t_loc - lag_v, k_x, n_obs)]
-                                                - x_between[idx(g, k_x, g_cnt)]
-                                        } else {
-                                            x_in[idx(st + t_loc - lag_v, k_x, n_obs)]
-                                        };
-                                        u_lag -= slopes_g
-                                            [idx(n_lags * d + k_x, m_col, n_slopes_per_out)]
-                                            * x_l;
-                                    }
-                                    if m_col == j {
-                                        rem -= phi * u_lag;
-                                        c_mult -= phi;
-                                    } else {
-                                        rem -= phi * (u_lag - theta[idx(g, m_col, g_cnt)]);
-                                    }
-                                }
-                            }
+                            p_mu[idx(j, j, d)] += (c_mult * c_mult) / s2;
+                            b_mu[j] += c_mult * rem / s2;
                         }
-                        p_mu[idx(j, j, d)] += (c_mult * c_mult) / s2;
-                        b_mu[j] += c_mult * rem / s2;
                     }
                 }
                 let mu_draw = rmvnorm_precision(&mut rng, &p_mu, &b_mu, d);
@@ -544,66 +711,113 @@ pub fn mcmc_twolevel(
                     }
                     b_sl[c] = rhs;
                 }
-                for j in 0..d {
-                    let s2 = sig2_g[j].max(1e-6);
-                    let mu_gj = theta[idx(g, j, g_cnt)];
-                    for r_loc in 0..n_eff_g {
-                        let t_loc = r_loc + max_lag;
-                        let mut y_dev = y_work[idx(st + t_loc, j, n_obs)] - mu_gj;
-                        let mut reg_vec = vec![0.0; n_slopes_per_out];
-                        for (l_idx, &lag_v) in lags.iter().enumerate() {
-                            for m_col in 0..d {
-                                let y_l = y_work[idx(st + t_loc - lag_v, m_col, n_obs)];
-                                reg_vec[l_idx * d + m_col] = if residual_dynamics {
-                                    let mut u_l = y_l - theta[idx(g, m_col, g_cnt)];
-                                    for k_x in 0..kx {
-                                        let x_l = if latent_center_x[k_x] != 0 {
-                                            x_in[idx(st + t_loc - lag_v, k_x, n_obs)]
-                                                - x_between[idx(g, k_x, g_cnt)]
-                                        } else {
-                                            x_in[idx(st + t_loc - lag_v, k_x, n_obs)]
-                                        };
-                                        u_l -= slopes_g
-                                            [idx(n_lags * d + k_x, m_col, n_slopes_per_out)]
-                                            * x_l;
-                                    }
-                                    u_l
-                                } else if latent_center_y {
-                                    y_l - theta[idx(g, m_col, g_cnt)]
-                                } else {
-                                    y_l
-                                };
-                            }
-                        }
-                        for k_x in 0..kx {
-                            reg_vec[n_lags * d + k_x] = if latent_center_x[k_x] != 0 {
-                                x_in[idx(st + t_loc, k_x, n_obs)] - x_between[idx(g, k_x, g_cnt)]
+                let mut reg_vec = vec![0.0; n_slopes_per_out];
+                let mut y_dev_vec = vec![0.0; d];
+                let mut active_by_j: Vec<Vec<(usize, f64)>> = vec![Vec::new(); d];
+                for r_loc in 0..n_eff_g {
+                    let t_loc = r_loc + max_lag;
+                    for (l_idx, &lag_v) in lags.iter().enumerate() {
+                        for m_col in 0..d {
+                            let y_l = y_work[idx(st + t_loc - lag_v, m_col, n_obs)];
+                            reg_vec[l_idx * d + m_col] = if residual_dynamics {
+                                let mut u_l = y_l - theta[idx(g, m_col, g_cnt)];
+                                for k_x in 0..kx {
+                                    let x_l = if latent_center_x[k_x] != 0 {
+                                        x_in[idx(st + t_loc - lag_v, k_x, n_obs)]
+                                            - x_between[idx(g, k_x, g_cnt)]
+                                    } else {
+                                        x_in[idx(st + t_loc - lag_v, k_x, n_obs)]
+                                    };
+                                    u_l -= slopes_g[idx(n_lags * d + k_x, m_col, n_slopes_per_out)]
+                                        * x_l;
+                                }
+                                u_l
+                            } else if latent_center_y {
+                                y_l - theta[idx(g, m_col, g_cnt)]
                             } else {
-                                x_in[idx(st + t_loc, k_x, n_obs)]
+                                y_l
                             };
                         }
-                        // Subtract fixed-slope contributions
-                        let mut active_rs: Vec<(usize, f64)> = Vec::new();
+                    }
+                    for k_x in 0..kx {
+                        reg_vec[n_lags * d + k_x] = if latent_center_x[k_x] != 0 {
+                            x_in[idx(st + t_loc, k_x, n_obs)] - x_between[idx(g, k_x, g_cnt)]
+                        } else {
+                            x_in[idx(st + t_loc, k_x, n_obs)]
+                        };
+                    }
+                    for j in 0..d {
+                        active_by_j[j].clear();
+                        let mut yd = y_work[idx(st + t_loc, j, n_obs)] - theta[idx(g, j, g_cnt)];
                         for (s, &rv_s) in reg_vec.iter().enumerate().take(n_slopes_per_out) {
                             let flat = j * n_slopes_per_out + s;
                             if slope_re_idx[flat] >= 0 {
-                                let loc_idx = slope_re_idx[flat] as usize - d;
-                                active_rs.push((loc_idx, rv_s));
+                                active_by_j[j].push((slope_re_idx[flat] as usize - d, rv_s));
                             } else {
-                                y_dev -= fixed_slopes[fixed_slope_idx[flat] as usize] * rv_s;
+                                yd -= fixed_slopes[fixed_slope_idx[flat] as usize] * rv_s;
                             }
                         }
-                        for &(ri, xv_r) in &active_rs {
-                            b_sl[ri] += xv_r * y_dev / s2;
-                            for &(ci, xv_c) in &active_rs {
-                                p_sl[idx(ri, ci, n_rand_slopes)] += xv_r * xv_c / s2;
+                        y_dev_vec[j] = yd;
+                    }
+                    if use_full_sigma_w {
+                        for j in 0..d {
+                            for k in 0..d {
+                                let w_jk = sigma_w_inv[idx(j, k, d)];
+                                if w_jk.abs() < 1e-14 {
+                                    continue;
+                                }
+                                let ydk = y_dev_vec[k];
+                                for &(ri, xv_r) in &active_by_j[j] {
+                                    b_sl[ri] += w_jk * xv_r * ydk;
+                                    for &(ci, xv_c) in &active_by_j[k] {
+                                        p_sl[idx(ri, ci, n_rand_slopes)] += w_jk * xv_r * xv_c;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        for j in 0..d {
+                            let inv_s2 = 1.0 / sig2_g[j].max(1e-6);
+                            let ydj = y_dev_vec[j];
+                            for &(ri, xv_r) in &active_by_j[j] {
+                                b_sl[ri] += xv_r * ydj * inv_s2;
+                                for &(ci, xv_c) in &active_by_j[j] {
+                                    p_sl[idx(ri, ci, n_rand_slopes)] += xv_r * xv_c * inv_s2;
+                                }
                             }
                         }
                     }
                 }
                 let sl_draw = rmvnorm_precision(&mut rng, &p_sl, &b_sl, n_rand_slopes);
-                for s in 0..n_rand_slopes {
-                    theta[idx(g, d + s, g_cnt)] = sl_draw[s];
+                // Exact stationary initial-state MH step for short-T univariate AR(1) (Asparouhov 2026)
+                if latent_center_y
+                    && !residual_dynamics
+                    && d == 1
+                    && n_lags == 1
+                    && kx == 0
+                    && n_rand_slopes == 1
+                    && slope_re_idx[0] >= 0
+                {
+                    let phi_cur = theta[idx(g, d, g_cnt)];
+                    let phi_prop = sl_draw[0];
+                    if phi_prop.abs() < 0.995 {
+                        if phi_cur.abs() >= 0.995 {
+                            theta[idx(g, d, g_cnt)] = phi_prop;
+                        } else {
+                            let e0 = y_work[idx(st, 0, n_obs)] - theta[idx(g, 0, g_cnt)];
+                            let s2 = sig2_g[0].max(1e-6);
+                            let log_acc = 0.5
+                                * ((1.0 - phi_prop * phi_prop) / (1.0 - phi_cur * phi_cur)).ln()
+                                + 0.5 * (phi_prop * phi_prop - phi_cur * phi_cur) * e0 * e0 / s2;
+                            if log_acc >= 0.0 || rng.runif().ln() < log_acc {
+                                theta[idx(g, d, g_cnt)] = phi_prop;
+                            }
+                        }
+                    }
+                } else {
+                    for s in 0..n_rand_slopes {
+                        theta[idx(g, d + s, g_cnt)] = sl_draw[s];
+                    }
                 }
                 // Refresh slopes_g
                 for j in 0..d {
@@ -617,16 +831,13 @@ pub fn mcmc_twolevel(
                 }
             }
 
-            // Step iii: Metropolis-Hastings update for random log residual variances logv_{g,j}
+            // Step iii: Strictly-concave Newton-Laplace Independence MH for random log residual variances logv_{g,j}
             for j in 0..d {
                 if logv_re_idx[j] >= 0 {
                     let q_idx = logv_re_idx[j] as usize;
-                    let lv_slot = q_idx - (d + n_rand_slopes);
-                    let mh_i = g * n_rand_logv + lv_slot;
-                    let cur_lv = theta[idx(g, q_idx, g_cnt)];
-                    let prop_lv = (cur_lv + mh_step_logv[mh_i] * rng.rnorm()).clamp(-10.0, 10.0);
+                    let mut cur_lv = theta[idx(g, q_idx, g_cnt)];
 
-                    // Compute cluster residual sum of squares for outcome j
+                    // Compute cluster residual sum of squares for outcome j (constant across logv proposals)
                     let mut rss_j = 0.0;
                     let mu_gj = theta[idx(g, j, g_cnt)];
                     for r_loc in 0..n_eff_g {
@@ -657,59 +868,80 @@ pub fn mcmc_twolevel(
                         rss_j += err * err;
                     }
                     let mut n_cnt = n_eff_g as f64;
-                    if latent_center_y && !residual_dynamics && n_lags == 1 && d == 1 {
+                    if latent_center_y && !residual_dynamics && n_lags == 1 && d == 1 && kx == 0 {
                         let phi = slopes_g[0].clamp(-0.98, 0.98);
                         let e0 = y_work[idx(st, 0, n_obs)] - mu_gj;
                         rss_j += (1.0 - phi * phi).max(0.02) * e0 * e0;
                         n_cnt += 1.0;
                     }
 
-                    let logpost = |lv_val: f64, th_slice: &[f64]| -> f64 {
-                        let mut lp = -0.5 * n_cnt * lv_val - 0.5 * (-lv_val).exp() * rss_j;
-                        let mut diff = vec![0.0; q_re];
-                        for q in 0..q_re {
-                            let v = if q == q_idx { lv_val } else { th_slice[q] };
-                            diff[q] = v - mu_prior_g[q];
+                    // Collapse exact Gaussian conditional prior (Omega_B^{-1} + distal z likelihood) into (p_tot, m_prior)
+                    let mut p_tot = omega_inv[idx(q_idx, q_idx, q_re)].max(1e-8);
+                    let mut info_tot = p_tot * mu_prior_g[q_idx];
+                    for r in 0..q_re {
+                        if r != q_idx {
+                            info_tot -= omega_inv[idx(q_idx, r, q_re)]
+                                * (theta[idx(g, r, g_cnt)] - mu_prior_g[r]);
                         }
-                        lp -= 0.5 * quad_form(&diff, &omega_inv, q_re);
-                        for m_z in 0..kz {
-                            let zv = z_in[idx(g, m_z, g_cnt)];
-                            if zv.is_finite() && z_on_re_mask[idx(q_idx, m_z, q_re)] != 0 {
-                                let mut zp = beta_z[idx(0, m_z, p_z)];
-                                for q in 0..q_re {
-                                    if z_on_re_mask[idx(q, m_z, q_re)] != 0 {
-                                        let v = if q == q_idx { lv_val } else { th_slice[q] };
-                                        zp += beta_z[idx(1 + q, m_z, p_z)] * v;
-                                    }
+                    }
+                    for m_z in 0..kz {
+                        let zv = z_in[idx(g, m_z, g_cnt)];
+                        if zv.is_finite() && z_on_re_mask[idx(q_idx, m_z, q_re)] != 0 {
+                            let sz2 = sigma2_z[m_z].max(1e-6);
+                            let bq = beta_z[idx(1 + q_idx, m_z, p_z)];
+                            let mut rz = zv - beta_z[idx(0, m_z, p_z)];
+                            for r in 0..q_re {
+                                if r != q_idx && z_on_re_mask[idx(r, m_z, q_re)] != 0 {
+                                    rz -= beta_z[idx(1 + r, m_z, p_z)] * theta[idx(g, r, g_cnt)];
                                 }
-                                for kw_i in 0..kw {
-                                    if z_on_w_mask[idx(kw_i, m_z, kw)] != 0 {
-                                        zp += beta_z[idx(1 + q_re + kw_i, m_z, p_z)]
-                                            * w_in[idx(g, kw_i, g_cnt)];
-                                    }
-                                }
-                                let ez = zv - zp;
-                                lp -= 0.5 * ez * ez / sigma2_z[m_z].max(1e-6);
                             }
+                            for kw_i in 0..kw {
+                                if z_on_w_mask[idx(kw_i, m_z, kw)] != 0 {
+                                    rz -= beta_z[idx(1 + q_re + kw_i, m_z, p_z)]
+                                        * w_in[idx(g, kw_i, g_cnt)];
+                                }
+                            }
+                            p_tot += (bq * bq) / sz2;
+                            info_tot += (bq * rz) / sz2;
                         }
-                        lp
+                    }
+                    let m_prior = (info_tot / p_tot).clamp(-10.0, 10.0);
+
+                    // Find exact unique mode of strictly concave f(v) = -0.5*n*v - 0.5*exp(-v)*rss - 0.5*p_tot*(v - m_prior)^2
+                    let mut v_mode = m_prior.clamp(-8.0, 8.0);
+                    for _ in 0..6 {
+                        let exp_mv = (-v_mode).exp().min(1e12);
+                        let g1 = -0.5 * n_cnt + 0.5 * exp_mv * rss_j - p_tot * (v_mode - m_prior);
+                        let neg_g2 = (0.5 * exp_mv * rss_j + p_tot).max(1e-6);
+                        let delta = (g1 / neg_g2).clamp(-2.0, 2.0);
+                        v_mode = (v_mode + delta).clamp(-10.0, 10.0);
+                        if delta.abs() < 1e-6 {
+                            break;
+                        }
+                    }
+                    let hess_mode = (0.5 * (-v_mode).exp().min(1e12) * rss_j + p_tot).max(1e-6);
+                    let prop_sd = (1.25 / hess_mode.sqrt()).clamp(0.01, 2.5);
+
+                    let logpost = |v: f64| -> f64 {
+                        -0.5 * n_cnt * v
+                            - 0.5 * (-v).exp().min(1e12) * rss_j
+                            - 0.5 * p_tot * (v - m_prior) * (v - m_prior)
+                    };
+                    let logq = |v: f64| -> f64 {
+                        let z = (v - v_mode) / prop_sd;
+                        -0.5 * z * z
                     };
 
-                    let cur_th: Vec<f64> = (0..q_re).map(|q| theta[idx(g, q, g_cnt)]).collect();
-                    let log_acc = logpost(prop_lv, &cur_th) - logpost(cur_lv, &cur_th);
-                    if rng.runif().ln() < log_acc {
-                        theta[idx(g, q_idx, g_cnt)] = prop_lv;
-                        mh_accept_logv[mh_i] += 1;
-                    }
-                    if step <= warmup && step % 25 == 0 {
-                        let rate = mh_accept_logv[mh_i] as f64 / 25.0;
-                        mh_accept_logv[mh_i] = 0;
-                        if rate > 0.55 {
-                            mh_step_logv[mh_i] = (mh_step_logv[mh_i] * 1.18).min(2.5);
-                        } else if rate < 0.30 {
-                            mh_step_logv[mh_i] = (mh_step_logv[mh_i] * 0.84).max(0.02);
+                    // Two independent Laplace-MH draws (independent of cur_lv -> exact detailed balance, near-zero autocorrelation)
+                    for _ in 0..2 {
+                        let prop_lv = (v_mode + prop_sd * rng.rnorm()).clamp(-10.0, 10.0);
+                        let log_acc =
+                            (logpost(prop_lv) - logq(prop_lv)) - (logpost(cur_lv) - logq(cur_lv));
+                        if rng.runif().ln() < log_acc {
+                            cur_lv = prop_lv;
                         }
                     }
+                    theta[idx(g, q_idx, g_cnt)] = cur_lv;
                 }
             }
         }
@@ -725,6 +957,8 @@ pub fn mcmc_twolevel(
                 },
             );
             let mut b_fs = vec![0.0; n_fixed_slopes];
+            let mut active_by_j: Vec<Vec<(usize, f64)>> = vec![Vec::new(); d];
+            let mut y_dev_vec = vec![0.0; d];
             for g in 0..g_cnt {
                 let st = offsets[g];
                 let en = offsets[g + 1];
@@ -732,20 +966,11 @@ pub fn mcmc_twolevel(
                 if tg <= max_lag {
                     continue;
                 }
-                for j in 0..d {
-                    let s2 = if is_cat[j] {
-                        1.0
-                    } else if logv_re_idx[j] >= 0 {
-                        theta[idx(g, logv_re_idx[j] as usize, g_cnt)]
-                            .clamp(-12.0, 12.0)
-                            .exp()
-                    } else {
-                        fixed_sigma2[j].max(1e-6)
-                    };
-                    let mu_gj = theta[idx(g, j, g_cnt)];
-                    for t_loc in max_lag..tg {
+                for t_loc in max_lag..tg {
+                    for j in 0..d {
+                        active_by_j[j].clear();
+                        let mu_gj = theta[idx(g, j, g_cnt)];
                         let mut y_dev = y_work[idx(st + t_loc, j, n_obs)] - mu_gj;
-                        let mut active: Vec<(usize, f64)> = Vec::new();
                         for s in 0..n_slopes_per_out {
                             let xv = if s < n_lags * d {
                                 let l_idx = s / d;
@@ -769,13 +994,44 @@ pub fn mcmc_twolevel(
                             if slope_re_idx[flat] >= 0 {
                                 y_dev -= theta[idx(g, slope_re_idx[flat] as usize, g_cnt)] * xv;
                             } else {
-                                active.push((fixed_slope_idx[flat] as usize, xv));
+                                active_by_j[j].push((fixed_slope_idx[flat] as usize, xv));
                             }
                         }
-                        for &(fi, x_f) in &active {
-                            b_fs[fi] += x_f * y_dev / s2;
-                            for &(fj, x_fj) in &active {
-                                p_fs[idx(fi, fj, n_fixed_slopes)] += x_f * x_fj / s2;
+                        y_dev_vec[j] = y_dev;
+                    }
+                    if use_full_sigma_w {
+                        for j in 0..d {
+                            for k in 0..d {
+                                let w_jk = sigma_w_inv[idx(j, k, d)];
+                                if w_jk.abs() < 1e-14 {
+                                    continue;
+                                }
+                                let ydk = y_dev_vec[k];
+                                for &(fi, x_f) in &active_by_j[j] {
+                                    b_fs[fi] += w_jk * x_f * ydk;
+                                    for &(fj, x_fj) in &active_by_j[k] {
+                                        p_fs[idx(fi, fj, n_fixed_slopes)] += w_jk * x_f * x_fj;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        for j in 0..d {
+                            let s2 = if is_cat[j] {
+                                1.0
+                            } else if logv_re_idx[j] >= 0 {
+                                theta[idx(g, logv_re_idx[j] as usize, g_cnt)]
+                                    .clamp(-12.0, 12.0)
+                                    .exp()
+                            } else {
+                                fixed_sigma2[j].max(1e-6)
+                            };
+                            let ydj = y_dev_vec[j];
+                            for &(fi, x_f) in &active_by_j[j] {
+                                b_fs[fi] += x_f * ydj / s2;
+                                for &(fj, x_fj) in &active_by_j[j] {
+                                    p_fs[idx(fi, fj, n_fixed_slopes)] += x_f * x_fj / s2;
+                                }
                             }
                         }
                     }
@@ -784,31 +1040,31 @@ pub fn mcmc_twolevel(
             fixed_slopes = rmvnorm_precision(&mut rng, &p_fs, &b_fs, n_fixed_slopes);
         }
 
-        // 3. Update fixed within-level residual variances (for outcomes without random logv)
-        for j in 0..d {
-            if logv_re_idx[j] < 0 && !is_cat[j] {
-                let mut rss = 0.0;
-                let mut cnt = 0usize;
-                for g in 0..g_cnt {
-                    let st = offsets[g];
-                    let en = offsets[g + 1];
-                    let tg = en - st;
-                    if tg <= max_lag {
-                        continue;
+        // 3. Update fixed within-level residual variances / unstructured covariance Sigma_W
+        if use_full_sigma_w {
+            let mut s_mat = eye(d, if prior_mode == 1 { 1e-6 } else { 0.002 });
+            let mut cnt = 0usize;
+            let mut e_vec = vec![0.0; d];
+            for g in 0..g_cnt {
+                let st = offsets[g];
+                let en = offsets[g + 1];
+                let tg = en - st;
+                if tg <= max_lag {
+                    continue;
+                }
+                let mut slopes_g = vec![0.0; n_slopes_per_out * d];
+                for jj in 0..d {
+                    for s in 0..n_slopes_per_out {
+                        let fl = jj * n_slopes_per_out + s;
+                        slopes_g[idx(s, jj, n_slopes_per_out)] = if slope_re_idx[fl] >= 0 {
+                            theta[idx(g, slope_re_idx[fl] as usize, g_cnt)]
+                        } else {
+                            fixed_slopes[fixed_slope_idx[fl] as usize]
+                        };
                     }
-                    let mut slopes_g = vec![0.0; n_slopes_per_out * d];
-                    for jj in 0..d {
-                        for s in 0..n_slopes_per_out {
-                            let fl = jj * n_slopes_per_out + s;
-                            slopes_g[idx(s, jj, n_slopes_per_out)] = if slope_re_idx[fl] >= 0 {
-                                theta[idx(g, slope_re_idx[fl] as usize, g_cnt)]
-                            } else {
-                                fixed_slopes[fixed_slope_idx[fl] as usize]
-                            };
-                        }
-                    }
-                    let mu_gj = theta[idx(g, j, g_cnt)];
-                    for t_loc in max_lag..tg {
+                }
+                for t_loc in max_lag..tg {
+                    for j in 0..d {
                         let pred = cluster_cell_mean(
                             &y_work,
                             x_in,
@@ -823,7 +1079,7 @@ pub fn mcmc_twolevel(
                             kx,
                             lags,
                             max_lag,
-                            mu_gj,
+                            theta[idx(g, j, g_cnt)],
                             &theta,
                             &slopes_g,
                             n_slopes_per_out,
@@ -831,17 +1087,92 @@ pub fn mcmc_twolevel(
                             residual_dynamics,
                             n_obs,
                         );
-                        let err = y_work[idx(st + t_loc, j, n_obs)] - pred;
-                        rss += err * err;
-                        cnt += 1;
+                        e_vec[j] = y_work[idx(st + t_loc, j, n_obs)] - pred;
                     }
+                    for c in 0..d {
+                        for r in 0..d {
+                            s_mat[idx(r, c, d)] += e_vec[r] * e_vec[c];
+                        }
+                    }
+                    cnt += 1;
                 }
-                let (sh, sc) = if prior_mode == 1 {
-                    ((0.5 * cnt as f64 - 1.0).max(0.5), 0.5 * rss.max(1e-8))
-                } else {
-                    (0.001 + 0.5 * cnt as f64, 0.001 + 0.5 * rss)
-                };
-                fixed_sigma2[j] = rng.rinv_gamma(sh, sc);
+            }
+            let df_post = if prior_mode == 1 {
+                (cnt as f64 - d as f64 - 1.0).max(d as f64 + 1.0)
+            } else {
+                (d as f64 + 2.0) + cnt as f64
+            };
+            sigma_w = rinv_wishart(&mut rng, df_post, &s_mat, d);
+            symmetrize(&mut sigma_w, d);
+            for j in 0..d {
+                fixed_sigma2[j] = sigma_w[idx(j, j, d)].max(1e-6);
+            }
+        } else {
+            for j in 0..d {
+                if logv_re_idx[j] < 0 && !is_cat[j] {
+                    let mut rss = 0.0;
+                    let mut cnt = 0usize;
+                    for g in 0..g_cnt {
+                        let st = offsets[g];
+                        let en = offsets[g + 1];
+                        let tg = en - st;
+                        if tg <= max_lag {
+                            continue;
+                        }
+                        let mut slopes_g = vec![0.0; n_slopes_per_out * d];
+                        for jj in 0..d {
+                            for s in 0..n_slopes_per_out {
+                                let fl = jj * n_slopes_per_out + s;
+                                slopes_g[idx(s, jj, n_slopes_per_out)] = if slope_re_idx[fl] >= 0 {
+                                    theta[idx(g, slope_re_idx[fl] as usize, g_cnt)]
+                                } else {
+                                    fixed_slopes[fixed_slope_idx[fl] as usize]
+                                };
+                            }
+                        }
+                        let mu_gj = theta[idx(g, j, g_cnt)];
+                        if latent_center_y && !residual_dynamics && n_lags == 1 && d == 1 && kx == 0
+                        {
+                            let phi = slopes_g[0].clamp(-0.98, 0.98);
+                            let e0 = y_work[idx(st, 0, n_obs)] - mu_gj;
+                            rss += (1.0 - phi * phi).max(0.02) * e0 * e0;
+                            cnt += 1;
+                        }
+                        for t_loc in max_lag..tg {
+                            let pred = cluster_cell_mean(
+                                &y_work,
+                                x_in,
+                                &x_between,
+                                latent_center_x,
+                                g,
+                                g_cnt,
+                                st,
+                                t_loc,
+                                j,
+                                d,
+                                kx,
+                                lags,
+                                max_lag,
+                                mu_gj,
+                                &theta,
+                                &slopes_g,
+                                n_slopes_per_out,
+                                latent_center_y,
+                                residual_dynamics,
+                                n_obs,
+                            );
+                            let err = y_work[idx(st + t_loc, j, n_obs)] - pred;
+                            rss += err * err;
+                            cnt += 1;
+                        }
+                    }
+                    let (sh, sc) = if prior_mode == 1 {
+                        ((0.5 * cnt as f64 - 1.0).max(0.5), 0.5 * rss.max(1e-8))
+                    } else {
+                        (0.001 + 0.5 * cnt as f64, 0.001 + 0.5 * rss)
+                    };
+                    fixed_sigma2[j] = rng.rinv_gamma(sh, sc);
+                }
             }
         }
 
@@ -1054,10 +1385,22 @@ pub fn mcmc_twolevel(
                     cur += 1;
                 }
             }
-            for j in 0..d {
-                if logv_re_idx[j] < 0 && !is_cat[j] {
-                    draws[idx(keep_pos, cur, n_keep)] = fixed_sigma2[j];
-                    cur += 1;
+            if use_full_sigma_w {
+                for c in 0..d {
+                    for r in c..d {
+                        draws[idx(keep_pos, cur, n_keep)] = sigma_w[idx(r, c, d)];
+                        cur += 1;
+                    }
+                }
+                for i in 0..(d * d) {
+                    sigma_w_accum[i] += sigma_w[i];
+                }
+            } else {
+                for j in 0..d {
+                    if logv_re_idx[j] < 0 && !is_cat[j] {
+                        draws[idx(keep_pos, cur, n_keep)] = fixed_sigma2[j];
+                        cur += 1;
+                    }
                 }
             }
             for m_z in 0..kz {
@@ -1088,6 +1431,13 @@ pub fn mcmc_twolevel(
 
             // Accumulate conditional log-likelihood & fitted values
             let mut ll_iter = 0.0;
+            let (sw_logdet, sw_inv_cur) = if use_full_sigma_w {
+                let l_sw = chol_lower_jitter(&sigma_w, d);
+                (spd_logdet(&l_sw, d), spd_invert(&sigma_w, d))
+            } else {
+                (0.0, Vec::new())
+            };
+            let mut err_row = vec![0.0; d];
             for g in 0..g_cnt {
                 let st = offsets[g];
                 let en = offsets[g + 1];
@@ -1114,8 +1464,11 @@ pub fn mcmc_twolevel(
                         fixed_sigma2[j].max(1e-6)
                     };
                     sig_bar_accum[idx(g, j, g_cnt)] += s2;
-                    let mu_gj = theta[idx(g, j, g_cnt)];
-                    for t_loc in 0..tg {
+                }
+                for t_loc in 0..tg {
+                    let mut all_obs = true;
+                    for j in 0..d {
+                        let mu_gj = theta[idx(g, j, g_cnt)];
                         let fv = if t_loc >= max_lag {
                             cluster_cell_mean(
                                 &y_work,
@@ -1142,12 +1495,43 @@ pub fn mcmc_twolevel(
                         } else {
                             mu_gj
                         };
-                        fitted_accum[idx(st + t_loc, j, n_obs)] += fv;
-                        pred_bar_accum[idx(st + t_loc, j, n_obs)] += fv;
-                        if t_loc >= max_lag && !miss_y[idx(st + t_loc, j, n_obs)] {
-                            let err = y_work[idx(st + t_loc, j, n_obs)] - fv;
-                            ll_iter += -0.5 * ((2.0 * PI * s2).ln() + err * err / s2);
+                        let cell = idx(st + t_loc, j, n_obs);
+                        fitted_accum[cell] += fv;
+                        pred_bar_accum[cell] += fv;
+                        if t_loc >= max_lag {
+                            if miss_y[cell] {
+                                all_obs = false;
+                            } else if !use_full_sigma_w && !is_cat[j] {
+                                let s2 = if logv_re_idx[j] >= 0 {
+                                    theta[idx(g, logv_re_idx[j] as usize, g_cnt)]
+                                        .clamp(-12.0, 12.0)
+                                        .exp()
+                                } else {
+                                    fixed_sigma2[j].max(1e-6)
+                                };
+                                let sd_j = s2.sqrt();
+                                match cens_flag[cell] {
+                                    -1 => {
+                                        let lo_j = censor_lo.get(j).copied().unwrap_or(0.0);
+                                        ll_iter += log_std_norm_cdf((lo_j - fv) / sd_j);
+                                    }
+                                    1 => {
+                                        let hi_j = censor_hi.get(j).copied().unwrap_or(0.0);
+                                        ll_iter += log_std_norm_cdf((fv - hi_j) / sd_j);
+                                    }
+                                    _ => {
+                                        let err = y_in[cell] - fv;
+                                        ll_iter += -0.5 * ((2.0 * PI * s2).ln() + err * err / s2);
+                                    }
+                                }
+                            } else if use_full_sigma_w {
+                                err_row[j] = y_work[cell] - fv;
+                            }
                         }
+                    }
+                    if use_full_sigma_w && t_loc >= max_lag && all_obs {
+                        let qf = quad_form(&err_row, &sw_inv_cur, d);
+                        ll_iter += -0.5 * ((d as f64) * (2.0 * PI).ln() + sw_logdet + qf);
                     }
                 }
             }
@@ -1158,26 +1542,78 @@ pub fn mcmc_twolevel(
 
     let inv_keep = 1.0 / (n_keep.max(1) as f64);
     let fitted_mean: Vec<f64> = fitted_accum.into_iter().map(|v| v * inv_keep).collect();
-    let d_bar = deviance_sum * inv_keep;
-    let mut ll_hat = 0.0;
-    for g in 0..g_cnt {
-        let st = offsets[g];
-        let en = offsets[g + 1];
-        let tg = en - st;
-        for j in 0..d {
-            let s2 = (sig_bar_accum[idx(g, j, g_cnt)] * inv_keep).max(1e-6);
+    let has_continuous = is_cat.iter().any(|&b| !b);
+    let (dic, pd) = if use_full_sigma_w {
+        let d_bar = deviance_sum * inv_keep;
+        let sw_bar: Vec<f64> = sigma_w_accum.into_iter().map(|v| v * inv_keep).collect();
+        let l_sw = chol_lower_jitter(&sw_bar, d);
+        let sw_logdet = spd_logdet(&l_sw, d);
+        let sw_inv_bar = spd_invert(&sw_bar, d);
+        let mut ll_hat = 0.0;
+        let mut err_row = vec![0.0; d];
+        for g in 0..g_cnt {
+            let st = offsets[g];
+            let en = offsets[g + 1];
+            let tg = en - st;
             for t_loc in max_lag..tg {
-                if !miss_y[idx(st + t_loc, j, n_obs)] {
-                    let fv = pred_bar_accum[idx(st + t_loc, j, n_obs)] * inv_keep;
-                    let err = y_work[idx(st + t_loc, j, n_obs)] - fv;
-                    ll_hat += -0.5 * ((2.0 * PI * s2).ln() + err * err / s2);
+                let mut all_obs = true;
+                for (j, err_j) in err_row.iter_mut().enumerate().take(d) {
+                    let cell = idx(st + t_loc, j, n_obs);
+                    if miss_y[cell] {
+                        all_obs = false;
+                        break;
+                    }
+                    *err_j = y_in[cell] - pred_bar_accum[cell] * inv_keep;
+                }
+                if all_obs {
+                    let qf = quad_form(&err_row, &sw_inv_bar, d);
+                    ll_hat += -0.5 * ((d as f64) * (2.0 * PI).ln() + sw_logdet + qf);
                 }
             }
         }
-    }
-    let d_hat = -2.0 * ll_hat;
-    let pd = (d_bar - d_hat).max(0.0);
-    let dic = d_bar + pd;
+        let d_hat = -2.0 * ll_hat;
+        let pd_v = (d_bar - d_hat).max(0.0);
+        (d_bar + pd_v, pd_v)
+    } else if has_continuous {
+        let d_bar = deviance_sum * inv_keep;
+        let mut ll_hat = 0.0;
+        for g in 0..g_cnt {
+            let st = offsets[g];
+            let en = offsets[g + 1];
+            let tg = en - st;
+            for j in 0..d {
+                if !is_cat[j] {
+                    let s2 = (sig_bar_accum[idx(g, j, g_cnt)] * inv_keep).max(1e-6);
+                    let sd_j = s2.sqrt();
+                    for t_loc in max_lag..tg {
+                        let cell = idx(st + t_loc, j, n_obs);
+                        if !miss_y[cell] {
+                            let fv = pred_bar_accum[cell] * inv_keep;
+                            match cens_flag[cell] {
+                                -1 => {
+                                    let lo_j = censor_lo.get(j).copied().unwrap_or(0.0);
+                                    ll_hat += log_std_norm_cdf((lo_j - fv) / sd_j);
+                                }
+                                1 => {
+                                    let hi_j = censor_hi.get(j).copied().unwrap_or(0.0);
+                                    ll_hat += log_std_norm_cdf((fv - hi_j) / sd_j);
+                                }
+                                _ => {
+                                    let err = y_in[cell] - fv;
+                                    ll_hat += -0.5 * ((2.0 * PI * s2).ln() + err * err / s2);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let d_hat = -2.0 * ll_hat;
+        let pd_v = (d_bar - d_hat).max(0.0);
+        (d_bar + pd_v, pd_v)
+    } else {
+        (f64::NAN, f64::NAN)
+    };
     let _ = (
         spd_logdet(&chol_lower_jitter(&omega_b, q_re), q_re),
         symmetrize,

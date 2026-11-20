@@ -22,6 +22,7 @@ simulate_dsem(
   indicator_intercepts = 0,
   residual_sd = 0.5,
   family = c("gaussian", "binary", "ordinal"),
+  censored = NULL,
   cross_classified = FALSE,
   time_sd = 0.25
 )
@@ -61,6 +62,10 @@ generating dynamic factor indicators.}
 
 \item{family}{Outcome family: \code{"gaussian"}, \code{"binary"}, or \code{"ordinal"}.}
 
+\item{censored}{Optional numeric length-2 censoring bounds \code{c(lower, upper)}
+(use \code{-Inf} or \code{Inf} for one-sided Tobit floor/ceiling censoring, e.g.,
+\code{c(0, Inf)} for left-censoring at zero).}
+
 \item{cross_classified}{Logical; if \code{TRUE}, adds occasion-specific random
 shocks with SD \code{time_sd}.}
 
@@ -72,10 +77,11 @@ in \code{attr(out, "dsem_truth")}.
 }
 \description{
 Generates synthetic intensive longitudinal datasets for single-level (\code{N=1}),
-two-level (\code{clusters} of length 1), Mplus Version 9 three-level (\code{clusters}
-of length 2: \code{c(n_level3, n_level2_per_level3)}), cross-classified
+two-level (\code{clusters} of length 1), three-level (\code{clusters} of length 2:
+\code{c(n_level3, n_level2_per_level3)}), cross-classified
 (\code{cross_classified = TRUE}), binary/ordinal probit (\code{family = "binary"} or
-\code{"ordinal"}), and latent dynamic factor models.
+\code{"ordinal"}), Tobit censored (\code{censored = c(lower, upper)}), and latent
+dynamic factor models.
 }
 \examples{
 # N=1 Gaussian AR(1)

@@ -15,7 +15,7 @@ Named numeric vector containing \code{dic}, \code{pd}, \code{d_bar}, and \code{l
 \description{
 Returns the Deviance Information Criterion (\code{DIC}), effective number of
 parameters (\code{pD}), posterior mean deviance (\code{D_bar}), and log-likelihood
-summary from a fitted \code{DSEMfit} object, matching Mplus \verb{MODEL FIT INFORMATION}.
+summary from a fitted \code{DSEMfit} object.
 }
 \examples{
 dat <- simulate_dsem(n = 60, seed = 4)

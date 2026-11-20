@@ -1,19 +1,20 @@
 #' Compile a dynamic structural equation model
 #'
-#' Compiles either the `DSEMr` extension of `lavaan` syntax or the clean-room
-#' Mplus Version 9 compatibility syntax into a canonical `DSEMmodel`
+#' Compiles either the `DSEMr` extension of `lavaan` syntax or standard
+#' section-based SEM/Mplus-compatible model scripts into a canonical `DSEMmodel`
 #' intermediate representation. Supports single-level (`N=1`), two-level
 #' (`TWOLEVEL RANDOM`), three-level (`THREELEVEL RANDOM` / DSEM3), and
 #' cross-classified (`CROSSCLASSIFIED RANDOM`) dynamic structural equation
-#' models, including latent centering, random slopes, random log innovation
-#' variances, residual dynamics (RDSEM), dynamic factor models (DAFS and WNFS),
-#' binary/ordinal probit links, and penalized shrinkage priors (PSEM).
+#' models, including latent variable centering, random slopes, random log
+#' innovation variances, residual dynamics (RDSEM), dynamic factor models
+#' (DAFS and WNFS), binary/ordinal probit links, Tobit censored outcomes, and
+#' penalized shrinkage priors (PSEM).
 #'
 #' @param model Character string containing a model specification.
 #' @param syntax Either `"auto"`, `"lavaan"`, or `"mplus"`.
 #' @param id Optional cluster identifier column name (length 1 for two-level or
 #'   cross-classified models; length 2 `c("level2", "level3")` for three-level
-#'   DSEM3 models, ordered from Level 2 to Level 3). When `NULL` and Mplus
+#'   DSEM3 models, ordered from Level 2 to Level 3). When `NULL` and script
 #'   syntax declares `CLUSTER = ...`, cluster names are inferred automatically.
 #' @param time Optional time index column name.
 #' @param family Outcome family (`"gaussian"`, `"binary"`, or `"ordinal"`).
@@ -24,11 +25,15 @@
 #'   "crossclassified"`.
 #' @param categorical Optional character vector of binary or ordinal variable
 #'   names modeled with a probit link.
-#' @param tinterval Optional positive numeric bin width for Mplus-compatible
-#'   `TINTERVAL` grid alignment.
+#' @param censored Optional Tobit censoring specification for floor/ceiling
+#'   continuous outcomes: `NULL`, a character vector of left-censored outcome
+#'   names, or a named list mapping outcome names to `"below"`, `"above"`,
+#'   `"both"`, or explicit numeric bounds `c(lower, upper)`.
+#' @param tinterval Optional positive numeric bin width for regular-grid
+#'   `TINTERVAL` time alignment.
 #' @param centering Within-cluster centering policy for covariates and outcomes:
-#'   `"latent"` (Mplus default latent variable decomposition across 2 or 3
-#'   levels), `"groupmean"`, `"grandmean"`, or `"none"`.
+#'   `"latent"` (default latent variable decomposition across 2 or 3 levels),
+#'   `"groupmean"`, `"grandmean"`, or `"none"`.
 #' @param metadata Optional named list retained with the compiled model.
 #' @return A `DSEMmodel` object.
 #' @examples
@@ -55,6 +60,7 @@ dsem_model <- function(model,
                        level_type = c("auto", "single", "twolevel", "threelevel", "crossclassified"),
                        time_cluster = NULL,
                        categorical = NULL,
+                       censored = NULL,
                        tinterval = NULL,
                        centering = c("latent", "groupmean", "grandmean", "none"),
                        metadata = list()) {
@@ -67,6 +73,7 @@ dsem_model <- function(model,
   syntax <- match.arg(syntax)
   family <- match.arg(family)
   level_type <- match.arg(level_type)
+  centering_missing <- missing(centering)
   centering <- match.arg(centering)
   if (!is.null(id)) {
     if (!is.character(id) || !length(id) || length(id) > 2L || anyNA(id) || any(!nzchar(id))) {
@@ -105,7 +112,13 @@ dsem_model <- function(model,
   if (length(cat_vars) && family == "gaussian") {
     family <- "binary"
   }
-  if (!is.null(parsed$mplus_centering) && missing(centering)) {
+  cens_spec <- .dsem_normalize_censored(censored)
+  if (length(parsed$mplus_censored)) {
+    for (nm in names(parsed$mplus_censored)) {
+      if (!nm %in% names(cens_spec)) cens_spec[[nm]] <- parsed$mplus_censored[[nm]]
+    }
+  }
+  if (!is.null(parsed$mplus_centering) && centering_missing) {
     centering <- parsed$mplus_centering
   }
   if (level_type == "auto") {
@@ -131,8 +144,10 @@ dsem_model <- function(model,
   parsed$time_cluster <- time_cluster
   parsed$level_type <- level_type
   parsed$categorical <- cat_vars
+  parsed$censored <- cens_spec
   parsed$tinterval <- tinterval
   parsed$centering <- centering
+  parsed$centered_vars <- parsed$mplus_centered_vars
   parsed$syntax <- syntax
   parsed$source <- model
   parsed$metadata <- metadata
@@ -311,7 +326,8 @@ dsem_model <- function(model,
     random = any(terms$random),
     residual_dynamic = any(terms$residual),
     cross_classified = identical(lvl, "crossclassified") || any(terms$level == "time"),
-    categorical = !identical(model$family, "gaussian") || length(model$categorical) > 0L
+    categorical = !identical(model$family, "gaussian") || length(model$categorical) > 0L,
+    censored = length(model$censored) > 0L
   )
 }
 
@@ -319,7 +335,8 @@ dsem_model <- function(model,
   semantics <- list(
     terms = model$terms, family = model$family, id = model$id,
     time = model$time, interval = .dsem_time_interval(model),
-    level_type = model$level_type, categorical = model$categorical
+    level_type = model$level_type, categorical = model$categorical,
+    censored = model$censored
   )
   paste0("dsem-", .dsem_stable_seed(1729L, paste(utils::capture.output(dput(semantics)), collapse = "")))
 }
@@ -332,10 +349,11 @@ print.DSEMmodel <- function(x, ...) {
   invisible(x)
 }
 
-#' Translate supported Mplus syntax to a DSEMr model
+#' Translate section-based SEM/Mplus script syntax to a DSEMr model
 #'
-#' @param model Character Mplus model input (supporting Mplus Version 8 and
-#'   Version 9 DSEM, RDSEM, THREELEVEL, and CROSSCLASSIFIED specifications).
+#' @param model Character string containing section-based SEM model syntax
+#'   (supporting single-level, two-level, three-level, and cross-classified
+#'   DSEM and RDSEM specifications).
 #' @param id,time,family,... Passed to [dsem_model()].
 #' @return A compiled `DSEMmodel` using the same canonical representation as
 #'   `lavaan`-style input.

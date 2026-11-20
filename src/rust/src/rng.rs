@@ -163,6 +163,22 @@ pub fn std_norm_cdf(x: f64) -> f64 {
     0.5 * (1.0 + erf_approx(x / SQRT_2))
 }
 
+#[inline]
+pub fn log_std_norm_cdf(x: f64) -> f64 {
+    if !x.is_finite() {
+        return if x.is_sign_negative() { -1e12 } else { 0.0 };
+    }
+    if x > -5.5 {
+        std_norm_cdf(x).max(1e-300).ln()
+    } else {
+        // Asymptotic Mills-ratio expansion for extreme left tail: Phi(x) ~ phi(x) / (-x)
+        let ax = -x;
+        let inv2 = 1.0 / (ax * ax);
+        let corr = (1.0 - inv2 + 3.0 * inv2 * inv2).max(0.5);
+        -0.5 * x * x - 0.5 * (2.0 * PI).ln() - ax.ln() + corr.ln()
+    }
+}
+
 pub fn std_norm_inv_cdf(p: f64) -> f64 {
     // Acklam's rational approximation to standard normal quantile
     const A: [f64; 6] = [

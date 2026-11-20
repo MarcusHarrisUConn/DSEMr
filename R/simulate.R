@@ -1,10 +1,11 @@
 #' Simulate dynamic structural equation model data
 #'
 #' Generates synthetic intensive longitudinal datasets for single-level (`N=1`),
-#' two-level (`clusters` of length 1), Mplus Version 9 three-level (`clusters`
-#' of length 2: `c(n_level3, n_level2_per_level3)`), cross-classified
+#' two-level (`clusters` of length 1), three-level (`clusters` of length 2:
+#' `c(n_level3, n_level2_per_level3)`), cross-classified
 #' (`cross_classified = TRUE`), binary/ordinal probit (`family = "binary"` or
-#' `"ordinal"`), and latent dynamic factor models.
+#' `"ordinal"`), Tobit censored (`censored = c(lower, upper)`), and latent
+#' dynamic factor models.
 #'
 #' @param model Optional compiled `DSEMmodel` used to infer variable names,
 #'   hierarchy, and measurement structure.
@@ -27,6 +28,9 @@
 #' @param loadings,indicator_intercepts,residual_sd Measurement parameters when
 #'   generating dynamic factor indicators.
 #' @param family Outcome family: `"gaussian"`, `"binary"`, or `"ordinal"`.
+#' @param censored Optional numeric length-2 censoring bounds `c(lower, upper)`
+#'   (use `-Inf` or `Inf` for one-sided Tobit floor/ceiling censoring, e.g.,
+#'   `c(0, Inf)` for left-censoring at zero).
 #' @param cross_classified Logical; if `TRUE`, adds occasion-specific random
 #'   shocks with SD `time_sd`.
 #' @param time_sd Standard deviation of occasion shocks when `cross_classified = TRUE`.
@@ -49,6 +53,7 @@ simulate_dsem <- function(model = NULL, n = 200L, intercept = 0, ar = 0.5,
                           id = "id", loadings = NULL,
                           indicator_intercepts = 0, residual_sd = 0.5,
                           family = c("gaussian", "binary", "ordinal"),
+                          censored = NULL,
                           cross_classified = FALSE, time_sd = 0.25) {
   family <- match.arg(family)
   latent_indicators <- NULL
@@ -94,10 +99,22 @@ simulate_dsem <- function(model = NULL, n = 200L, intercept = 0, ar = 0.5,
     .dsem_abort("Simulation column names must be non-empty, distinct strings.")
   }
 
+  if (!is.null(censored)) {
+    if (!is.numeric(censored) || length(censored) != 2L || anyNA(censored) || censored[1L] >= censored[2L]) {
+      .dsem_abort("`censored` must be NULL or a numeric length-2 vector c(lower, upper) with lower < upper.")
+    }
+  }
+
   discretize_vec <- function(v) {
-    if (family == "binary") as.double(v > 0)
-    else if (family == "ordinal") as.double(findInterval(v, c(-0.8, 0.8)))
-    else v
+    if (family == "binary") {
+      as.double(v > 0)
+    } else if (family == "ordinal") {
+      as.double(findInterval(v, c(-0.8, 0.8)))
+    } else if (!is.null(censored)) {
+      pmin(pmax(v, censored[1L]), censored[2L])
+    } else {
+      v
+    }
   }
 
   # Three-Level DSEM3 simulation: clusters = c(n_l3, n_l2_per_l3)

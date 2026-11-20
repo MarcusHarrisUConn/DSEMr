@@ -104,9 +104,9 @@ fn dsem_factor_sufficient(
     ))
 }
 
-/// Native Rust MCMC kernel for N=1 VAR(p), Covariate, RDSEM, and Categorical Probit DSEM.
+/// Native Rust MCMC kernel for N=1 VAR(p), Covariate, RDSEM, Probit, and Tobit Censored DSEM.
 /// dims = [n_time, d, kx, residual_dynamics, prior_mode, iter, warmup, thin, seed]
-/// hyper = [beta_sd, sigma_shape, sigma_scale]
+/// hyper = [beta_sd, sigma_shape, sigma_scale, optional censor_lo[0..d], optional censor_hi[0..d]]
 #[extendr]
 fn dsem_rust_var_n1(
     y: Vec<f64>,
@@ -119,15 +119,26 @@ fn dsem_rust_var_n1(
     if dims.len() < 9 || hyper.len() < 3 {
         return Err(Error::Other("invalid dims or hyper vector length".into()));
     }
+    let d = dims[1] as usize;
+    let (censor_lo, censor_hi) = if hyper.len() >= 3 + 2 * d {
+        (
+            hyper[3..(3 + d)].to_vec(),
+            hyper[(3 + d)..(3 + 2 * d)].to_vec(),
+        )
+    } else {
+        (vec![f64::NEG_INFINITY; d], vec![f64::INFINITY; d])
+    };
     let lags_u: Vec<usize> = lags.into_iter().map(|v| v.max(1) as usize).collect();
     let out = var_n1::mcmc_var_n1(
         &y,
         &x,
         dims[0] as usize,
-        dims[1] as usize,
+        d,
         dims[2] as usize,
         &lags_u,
         &outcome_types,
+        &censor_lo,
+        &censor_hi,
         dims[3] != 0,
         dims[4],
         hyper[0],
@@ -148,9 +159,9 @@ fn dsem_rust_var_n1(
     ))
 }
 
-/// Native Rust MCMC kernel for Two-Level Location-Scale DSEM & RDSEM (Mplus 9.30-9.32, 9.37).
+/// Native Rust MCMC kernel for Two-Level Location-Scale, Multivariate VAR, Censored, and RDSEM.
 /// dims = [d, kx, kw, kz, latent_center_y, residual_dynamics, prior_mode, iter, warmup, thin, seed]
-/// hyper = [beta_sd, omega_df_add, omega_scale_diag]
+/// hyper = [beta_sd, omega_df_add, omega_scale_diag, optional censor_lo[0..d], optional censor_hi[0..d]]
 /// masks = concatenated [z_on_re_mask, z_on_w_mask, re_on_w_mask, slope_is_random, has_random_logv, latent_center_x, outcome_types]
 #[extendr]
 #[allow(clippy::too_many_arguments)]
@@ -176,8 +187,7 @@ fn dsem_rust_twolevel(
     let n_sl = lags_u.len() * d + kx;
     let n_slope_entries = d * n_sl;
 
-    // Unpack masks deterministically from tail-known sizes:
-    // First compute q_re from slope_is_random & has_random_logv & outcome_types located at the end of masks!
+    // Unpack masks deterministically from tail-known sizes
     let tail_len = n_slope_entries + d + kx + d;
     if masks.len() < tail_len {
         return Err(Error::Other("masks vector too short".into()));
@@ -202,6 +212,15 @@ fn dsem_rust_twolevel(
     let z_on_w_mask = &masks[(q_re * kz)..(q_re * kz + kw * kz)];
     let re_on_w_mask = &masks[(q_re * kz + kw * kz)..head_len];
 
+    let (censor_lo, censor_hi) = if hyper.len() >= 3 + 2 * d {
+        (
+            hyper[3..(3 + d)].to_vec(),
+            hyper[(3 + d)..(3 + 2 * d)].to_vec(),
+        )
+    } else {
+        (vec![f64::NEG_INFINITY; d], vec![f64::INFINITY; d])
+    };
+
     let sizes_u: Vec<usize> = cluster_sizes.into_iter().map(|s| s as usize).collect();
     let out = twolevel::mcmc_twolevel(
         &y,
@@ -223,6 +242,8 @@ fn dsem_rust_twolevel(
         latent_center_x,
         dims[5] != 0,
         outcome_types,
+        &censor_lo,
+        &censor_hi,
         dims[6],
         hyper[0],
         hyper[1],
@@ -243,7 +264,7 @@ fn dsem_rust_twolevel(
     ))
 }
 
-/// Native Rust MCMC kernel for Mplus Version 9 Three-Level DSEM (DSEM3).
+/// Native Rust MCMC kernel for Three-Level DSEM (DSEM3, simultaneous two-level block Gibbs).
 /// dims = [g3_cnt, d, kx, kw2, kw3, residual_dynamics, prior_mode, iter, warmup, thin, seed]
 /// masks = [has_l2_re (q_tot), has_l3_re (q_tot), latent_center_x (kx)]
 #[extendr]
@@ -310,45 +331,60 @@ fn dsem_rust_threelevel(
     ))
 }
 
-/// Native Rust MCMC kernel for Cross-Classified DSEM (Mplus 9.38-9.40).
-/// dims = [n_id, n_time, d, kx, kw, has_random_slopes, has_random_logv, prior_mode, iter, warmup, thin, seed]
+/// Native Rust MCMC kernel for Cross-Classified DSEM with selective subject/time random slopes and predictors.
+/// dims = [n_id, n_time, d, kx, kw_id, kw_time, prior_mode, iter, warmup, thin, seed]
+/// masks = [slope_rand_id (d*n_sl), slope_rand_time (d*n_sl), has_random_logv (d)]
 #[extendr]
+#[allow(clippy::too_many_arguments)]
 fn dsem_rust_crossclassified(
     y_grid: Vec<f64>,
     x_grid: Vec<f64>,
     w_id: Vec<f64>,
+    w_time: Vec<f64>,
     lags: Vec<i32>,
+    masks: Vec<i32>,
     dims: Vec<i32>,
     beta_sd: f64,
 ) -> std::result::Result<List, Error> {
-    if dims.len() < 12 {
+    if dims.len() < 11 {
         return Err(Error::Other("invalid crossclassified dims length".into()));
     }
+    let d = dims[2] as usize;
+    let kx = dims[3] as usize;
     let lags_u: Vec<usize> = lags.into_iter().map(|v| v.max(1) as usize).collect();
+    let n_sl_tot = d * (lags_u.len() * d + kx);
+    if masks.len() != 2 * n_sl_tot + d {
+        return Err(Error::Other("invalid crossclassified masks length".into()));
+    }
     let out = crossclassified::mcmc_crossclassified(
         &y_grid,
         &x_grid,
         &w_id,
+        &w_time,
+        &masks[0..n_sl_tot],
+        &masks[n_sl_tot..(2 * n_sl_tot)],
+        &masks[(2 * n_sl_tot)..],
         dims[0] as usize,
         dims[1] as usize,
-        dims[2] as usize,
-        dims[3] as usize,
+        d,
+        kx,
         dims[4] as usize,
+        dims[5] as usize,
         &lags_u,
-        dims[5] != 0,
-        dims[6] != 0,
-        dims[7],
+        dims[6],
         beta_sd,
+        dims[7] as usize,
         dims[8] as usize,
         dims[9] as usize,
-        dims[10] as usize,
-        dims[11] as u64,
+        dims[10] as u64,
     );
     Ok(list!(
         draws = out.draws,
         param_count = out.param_count as i32,
         id_draws = out.id_draws,
         time_draws = out.time_draws,
+        q_id = out.q_id as i32,
+        q_time = out.q_time as i32,
         fitted_mean = out.fitted_mean,
         dic = out.dic,
         pd = out.pd
@@ -639,6 +675,8 @@ mod tests {
             &[],
             false,
             &[0],
+            &[f64::NEG_INFINITY],
+            &[f64::INFINITY],
             0,
             10.0,
             2.0,
@@ -677,5 +715,134 @@ mod tests {
         );
         assert_eq!(out3.draws.len(), 60 * out3.param_count);
         assert!(out3.dic.is_finite());
+    }
+
+    #[test]
+    fn tobit_censored_and_multivariate_twolevel_and_crossclassified_work() {
+        let mut r = rng::Rng::from_seed(2026);
+        // 1. Left-censored N=1 AR(1) at floor 0.0
+        let mut y_cens = vec![0.0; 120];
+        let mut prev = 0.2;
+        for val in &mut y_cens {
+            let y_star = 0.25 + 0.55 * prev + 0.6 * r.rnorm();
+            *val = y_star.max(0.0);
+            prev = y_star;
+        }
+        let out_c = var_n1::mcmc_var_n1(
+            &y_cens,
+            &[],
+            120,
+            1,
+            0,
+            &[1],
+            &[-1],
+            &[0.0],
+            &[f64::INFINITY],
+            false,
+            0,
+            10.0,
+            0.001,
+            0.001,
+            200,
+            100,
+            1,
+            55,
+        );
+        assert_eq!(out_c.draws.len(), 100 * out_c.param_count);
+        assert!(out_c.dic.is_finite());
+
+        // 2. Bivariate two-level VAR(1) with correlated within innovations Sigma_W
+        let mut y2 = vec![0.0; 8 * 20 * 2];
+        for g in 0..8 {
+            let mut p1 = 0.0;
+            let mut p2 = 0.0;
+            for t in 0..20 {
+                let e1 = 0.6 * r.rnorm();
+                let e2 = 0.5 * e1 + 0.5 * r.rnorm();
+                let c1 = 0.4 * p1 + 0.2 * p2 + e1;
+                let c2 = 0.3 * p2 + 0.15 * p1 + e2;
+                let row = g * 20 + t;
+                y2[row] = c1;
+                y2[160 + row] = c2;
+                p1 = c1;
+                p2 = c2;
+            }
+        }
+        let out_mv = twolevel::mcmc_twolevel(
+            &y2,
+            &[],
+            &[20; 8],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            2,
+            0,
+            0,
+            0,
+            &[1],
+            &[1, 1, 1, 1],
+            &[0, 0],
+            true,
+            &[],
+            false,
+            &[0, 0],
+            &[f64::NEG_INFINITY; 2],
+            &[f64::INFINITY; 2],
+            0,
+            10.0,
+            2.0,
+            0.05,
+            160,
+            80,
+            1,
+            88,
+        );
+        assert_eq!(out_mv.draws.len(), 80 * out_mv.param_count);
+        assert!(out_mv.dic.is_finite());
+
+        // 3. Cross-classified with selective random covariate slope across subject & time + w_time
+        let n_id = 6;
+        let n_t = 15;
+        let mut yc = vec![0.0; n_id * n_t];
+        let mut xc = vec![0.0; n_id * n_t];
+        let wt: Vec<f64> = (0..n_t).map(|t| (t as f64 - 7.0) / 5.0).collect();
+        for g in 0..n_id {
+            let mut prev_y = 0.0;
+            for t in 0..n_t {
+                let x_gt = r.rnorm();
+                xc[g * n_t + t] = x_gt;
+                let cur_y = 0.3 * prev_y + (0.5 + 0.2 * wt[t]) * x_gt + 0.5 * r.rnorm();
+                yc[g * n_t + t] = cur_y;
+                prev_y = cur_y;
+            }
+        }
+        let out_cc = crossclassified::mcmc_crossclassified(
+            &yc,
+            &xc,
+            &[],
+            &wt,
+            &[0, 1], // AR fixed, x slope random across subject
+            &[0, 1], // AR fixed, x slope random across time
+            &[0],
+            n_id,
+            n_t,
+            1,
+            1,
+            0,
+            1,
+            &[1],
+            0,
+            10.0,
+            160,
+            80,
+            1,
+            66,
+        );
+        assert_eq!(out_cc.q_id, 2);
+        assert_eq!(out_cc.q_time, 2);
+        assert_eq!(out_cc.draws.len(), 80 * out_cc.param_count);
+        assert!(out_cc.dic.is_finite());
     }
 }

@@ -1,0 +1,116 @@
+---
+title: "Model Comparison, APA Tables, LaTeX Equations, Path Diagrams, and Reproducible Code"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Model Comparison, APA Tables, LaTeX Equations, Path Diagrams, and Reproducible Code}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+## Overview
+
+`DSEMr` provides an integrated publication and reproducibility workflow built
+directly on top of its compiled Rust Bayesian DSEM backend:
+
+1. **Declarative model specification** (`dsem_spec()`) ready for scripted
+   pipelines or interactive drag-and-drop Shiny builders.
+2. **Bayesian model comparison** (`dsem_compare()` and `anova()`), including
+   `DIC`, `pD`, `delta_dic`, DIC model weights, and convergence flags.
+3. **Standardization, variance explained, and post-estimation analytics**
+   (`dsem_standardize()`, `dsem_r2()`, `dsem_partial_cor()`,
+   `dsem_hypothesis()`, `dsem_fscomparison()`, and `dsem_irf()`).
+4. **APA 7th Edition tables** (`dsem_table()`) in `data.frame`, `markdown`,
+   `latex` (`booktabs`), and `html`.
+5. **Automatic LaTeX model equations** (`dsem_equations()`), symbolic or
+   substituted with fitted posterior estimates.
+6. **Visual DSEM path diagrams** (`dsem_diagram()`) in base R graphics,
+   vector `svg`, `mermaid`, and Graphviz `dot`.
+7. **Full reproducible script and SEM syntax export** (`dsem_code()`,
+   `dsem_to_lavaan()`, and `dsem_to_mplus()`).
+
+## Fitting and Comparing Competing Models
+
+```{r compare}
+library(DSEMr)
+
+dat <- simulate_dsem(
+  n = 18, clusters = 10, intercept = 0.5, ar = 0.45, sigma = 0.7,
+  random_sd = c(0.3, 0.08), seed = 2026
+)
+dat$w <- ave(dat$y, dat$id, FUN = function(z) stats::rnorm(1))
+
+# Model 1: Random intercept + random AR(1) slope
+spec1 <- dsem_spec(
+  outcomes = "y", lags = 1L, id = "id", time = "time",
+  random_slopes = TRUE, random_logv = FALSE,
+  chains = 2, iter = 300, warmup = 150, seed = 2026
+)
+
+# Model 2: Location-scale DSEM with random log residual variance & predictor w
+spec2 <- dsem_spec(
+  outcomes = "y", lags = 1L, id = "id", time = "time",
+  predictors_between = "w",
+  random_slopes = TRUE, random_logv = TRUE,
+  chains = 2, iter = 300, warmup = 150, seed = 2026
+)
+
+fit1 <- dsem(spec1, dat)
+fit2 <- dsem(spec2, dat)
+
+cmp <- dsem_compare(AR1 = fit1, LocationScale = fit2)
+cmp
+```
+
+## Standardization, Bayesian R-squared, Partial Correlations, and Hypotheses
+
+```{r std-r2}
+dsem_standardize(fit2, type = "stdyx")
+dsem_r2(fit2)
+dsem_partial_cor(fit2)
+dsem_hypothesis(fit2, positive_ar = "mean_s > 0")
+```
+
+## Publication-Ready APA Tables
+
+```{r apa-table}
+dsem_table(fit2, format = "markdown", point = "median")
+dsem_table(cmp, format = "markdown")
+```
+
+For LaTeX manuscripts (`booktabs` + `threeparttable`) or HTML/Shiny reports,
+switch `format` to `"latex"`, `"html"`, or `"data.frame"`:
+
+```{r latex-table}
+cat(as.character(dsem_table(fit2, format = "latex")))
+```
+
+## Automatic LaTeX Equations
+
+```{r equations}
+# Symbolic multilevel equations
+dsem_equations(fit2)
+
+# Equations with posterior medians substituted
+dsem_equations(fit2, substitute = TRUE, digits = 2)
+```
+
+## Visual Path Diagrams
+
+```{r diagram, fig.width=7, fig.height=4.5}
+# Render directly to RStudio / R Markdown plot device
+dsem_diagram(fit2, format = "plot")
+
+# Export Mermaid or standalone SVG (for Quarto or Shiny apps)
+dsem_diagram(fit2, format = "mermaid")
+```
+
+## Full Reproducible R Script and SEM Script Export
+
+```{r code-export}
+dsem_code(fit2, data_name = "dat", include_outputs = FALSE)
+cat(dsem_to_mplus(spec2, data_file = "ema.dat"))
+```

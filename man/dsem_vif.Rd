@@ -18,8 +18,7 @@ and \code{vif}.
 }
 \description{
 Evaluates predictor collinearity across within-level and between-level
-regression blocks, providing parity with Mplus Version 9's built-in VIF
-diagnostics.
+regression blocks, reporting \eqn{\text{VIF}_j = 1 / (1 - R^2_j)}.
 }
 \examples{
 set.seed(12)

@@ -12,10 +12,11 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 ```
 
 `DSEMr` provides a unified R and compiled Rust framework for Bayesian dynamic
-structural equation modeling (DSEM) with parity across Mplus Version 8 and
-Version 9 DSEM families, including single-level VAR/RDSEM, two-level
-location-scale DSEM, three-level DSEM (`DSEM3`), cross-classified DSEM, dynamic
-factor/IRT models, and penalized shrinkage priors (`PSEM`).
+structural equation modeling (DSEM; Asparouhov, Hamaker, & Muthen, 2018),
+covering single-level VAR/RDSEM, Tobit censored and probit dynamic models,
+two-level location-scale and multivariate DSEM, three-level DSEM (`DSEM3`),
+cross-classified DSEM, dynamic factor/IRT models, and penalized shrinkage
+priors (`PSEM`).
 
 ## Single-level AR(1) and diagnostics
 
@@ -31,7 +32,7 @@ dsem_dic(fit)
 
 ## Covariate collinearity (VIF) and irregular time intervals (`TINTERVAL`)
 
-Mplus Version 9 diagnostics and time-grid alignment are available directly in R:
+Collinearity diagnostics and irregular time-grid alignment are available directly in R:
 
 ```{r}
 set.seed(11)

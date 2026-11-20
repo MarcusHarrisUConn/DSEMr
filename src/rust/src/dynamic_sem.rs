@@ -1137,22 +1137,27 @@ pub fn mcmc_dynamic_sem(
 
     let inv_keep = 1.0 / (n_keep.max(1) as f64);
     let fitted_mean: Vec<f64> = fitted_accum.into_iter().map(|v| v * inv_keep).collect();
-    let d_bar = deviance_sum * inv_keep;
-    let mut ll_hat = 0.0;
-    for j in 0..n_items {
-        if !is_cat[j] {
-            let th_bar = (theta_w_accum[j] * inv_keep).max(1e-6);
-            for r in 0..n_obs {
-                let y_obs = y_in[idx(r, j, n_obs)];
-                if y_obs.is_finite() {
-                    let e = y_obs - fitted_mean[idx(r, j, n_obs)];
-                    ll_hat += -0.5 * ((2.0 * PI * th_bar).ln() + e * e / th_bar);
+    let has_continuous = is_cat.iter().any(|&b| !b);
+    let (dic, pd) = if has_continuous {
+        let d_bar = deviance_sum * inv_keep;
+        let mut ll_hat = 0.0;
+        for j in 0..n_items {
+            if !is_cat[j] {
+                let th_bar = (theta_w_accum[j] * inv_keep).max(1e-6);
+                for r in 0..n_obs {
+                    let y_obs = y_in[idx(r, j, n_obs)];
+                    if y_obs.is_finite() {
+                        let e = y_obs - fitted_mean[idx(r, j, n_obs)];
+                        ll_hat += -0.5 * ((2.0 * PI * th_bar).ln() + e * e / th_bar);
+                    }
                 }
             }
         }
-    }
-    let pd = (d_bar - (-2.0 * ll_hat)).max(0.0);
-    let dic = d_bar + pd;
+        let pd_v = (d_bar - (-2.0 * ll_hat)).max(0.0);
+        (d_bar + pd_v, pd_v)
+    } else {
+        (f64::NAN, f64::NAN)
+    };
 
     DynamicSemOutput {
         draws,

@@ -23,7 +23,7 @@ dsem(
 )
 }
 \arguments{
-\item{model}{A \code{DSEMmodel} object or model specification string.}
+\item{model}{A \code{DSEMmodel}, \code{DSEMspec}, or model specification string.}
 
 \item{data}{A data frame in long format.}
 
@@ -48,25 +48,28 @@ index so draws are invariant to worker count.}
 \code{"rust"}, or transparent \code{"R"} reference implementation.}
 
 \item{control}{Named list of prior and estimation controls. Accepts
-\code{prior_mode} (\code{"default"}, \code{"mplus"}, or \code{"penalized"} for Mplus Version 9
-PSEM shrinkage), \code{beta_mean}, \code{beta_sd}, \code{sigma_shape}, \code{sigma_scale},
-\code{omega_df}, \code{omega_scale}, \code{coefficient_mean}, \code{coefficient_sd},
-\code{variance_shape}, \code{variance_scale}, and \code{ar_bound}.}
+\code{prior_mode} (\code{"default"}, \code{"mplus"} for diffuse priors, or \code{"penalized"}
+for Bayesian Lasso PSEM shrinkage), \code{beta_mean}, \code{beta_sd}, \code{sigma_shape},
+\code{sigma_scale}, \code{omega_df}, \code{omega_scale}, \code{coefficient_mean},
+\code{coefficient_sd}, \code{variance_shape}, \code{variance_scale}, and \code{ar_bound}.}
 }
 \value{
 A \code{DSEMfit} object with S3 methods \code{\link[=summary]{summary()}}, \code{\link[=coef]{coef()}}, \code{\link[=vcov]{vcov()}},
 \code{\link[=confint]{confint()}}, \code{\link[=logLik]{logLik()}}, \code{\link[=fitted]{fitted()}}, \code{\link[=residuals]{residuals()}}, \code{\link[=predict]{predict()}}, \code{\link[=plot]{plot()}},
-\code{\link[=dsem_standardize]{dsem_standardize()}}, \code{\link[=dsem_dic]{dsem_dic()}}, \code{\link[=dsem_vif]{dsem_vif()}}, and \code{\link[=dsem_inspect]{dsem_inspect()}}.
+\code{\link[=dsem_standardize]{dsem_standardize()}}, \code{\link[=dsem_dic]{dsem_dic()}}, \code{\link[=dsem_vif]{dsem_vif()}}, \code{\link[=dsem_r2]{dsem_r2()}},
+\code{\link[=dsem_partial_cor]{dsem_partial_cor()}}, \code{\link[=dsem_hypothesis]{dsem_hypothesis()}}, \code{\link[=dsem_irf]{dsem_irf()}},
+\code{\link[=dsem_fscomparison]{dsem_fscomparison()}}, and \code{\link[=dsem_inspect]{dsem_inspect()}}.
 }
 \description{
 Fits Bayesian dynamic structural equation models compiled by \code{\link[=dsem_model]{dsem_model()}}
-or specified directly via \code{lavaan}-style or Mplus Version 9 syntax.
-Supported model families include single-level (\code{N=1}) autoregressive and
-vector autoregressive (\code{VAR(p)}) models, residual dynamic models (\code{RDSEM}),
-binary and ordinal probit dynamic models, single- and multi-factor dynamic
-confirmatory factor / IRT models (\code{DAFS}, \code{WNFS}, \code{ARMA}), two-level
-location-scale DSEM with latent centering and random log residual variances,
-Mplus Version 9 three-level DSEM (\code{THREELEVEL} / \code{DSEM3}), and subject-by-time
+or specified directly via extended \code{lavaan} formulas or standard
+section-based SEM scripts. Supported model families include single-level
+(\code{N=1}) autoregressive and vector autoregressive (\code{VAR(p)}) models, residual
+dynamic models (\code{RDSEM}), binary/ordinal probit and Tobit censored dynamic
+models, single- and multi-factor dynamic confirmatory factor / IRT models
+(\code{DAFS}, \code{WNFS}, \code{ARMA}), two-level location-scale DSEM with latent
+centering, correlated within-level innovations, and random log residual
+variances, three-level DSEM (\code{THREELEVEL} / \code{DSEM3}), and subject-by-time
 cross-classified DSEM (\code{CROSSCLASSIFIED}).
 }
 \examples{

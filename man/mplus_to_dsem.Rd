@@ -2,7 +2,7 @@
 % Please edit documentation in R/model.R
 \name{mplus_to_dsem}
 \alias{mplus_to_dsem}
-\title{Translate supported Mplus syntax to a DSEMr model}
+\title{Translate section-based SEM/Mplus script syntax to a DSEMr model}
 \usage{
 mplus_to_dsem(
   model,
@@ -13,8 +13,9 @@ mplus_to_dsem(
 )
 }
 \arguments{
-\item{model}{Character Mplus model input (supporting Mplus Version 8 and
-Version 9 DSEM, RDSEM, THREELEVEL, and CROSSCLASSIFIED specifications).}
+\item{model}{Character string containing section-based SEM model syntax
+(supporting single-level, two-level, three-level, and cross-classified
+DSEM and RDSEM specifications).}
 
 \item{id, time, family, ...}{Passed to \code{\link[=dsem_model]{dsem_model()}}.}
 }
@@ -23,7 +24,7 @@ A compiled \code{DSEMmodel} using the same canonical representation as
 \code{lavaan}-style input.
 }
 \description{
-Translate supported Mplus syntax to a DSEMr model
+Translate section-based SEM/Mplus script syntax to a DSEMr model
 }
 \examples{
 m <- mplus_to_dsem("

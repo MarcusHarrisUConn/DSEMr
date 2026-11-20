@@ -11,18 +11,19 @@ vignette: >
 knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 ```
 
-Mplus Version 9 extends dynamic structural equation modeling to three-level
-hierarchies (`TYPE = THREELEVEL RANDOM`, or DSEM3; Asparouhov & Muthen, 2026)
+Three-level dynamic structural equation modeling (`DSEM3`; Asparouhov & Muthen,
+2026) extends intensive longitudinal modeling to nested three-level hierarchies
 such as momentary assessments nested within days/bursts (Level 2) nested within
 individuals or clinics (Level 3), alongside subject-by-time cross-classified
-DSEM (`TYPE = CROSSCLASSIFIED RANDOM`).
+DSEM. `DSEMr` uses simultaneous two-level block Gibbs updates (via exact Schur
+complement marginalization) for Level-2 and Level-3 random effects.
 
 ## Three-level DSEM (`DSEM3`)
 
 In `DSEMr`, three-level hierarchies are declared with `id = c("level2", "level3")`
 in `lavaan` syntax or `VARIABLE: CLUSTER = level3 level2; ANALYSIS: TYPE = THREELEVEL RANDOM;`
-in Mplus syntax. Latent variable decomposition separates Level-1, Level-2, and
-Level-3 variance components automatically.
+in section-based syntax. Latent variable decomposition separates Level-1,
+Level-2, and Level-3 variance components automatically.
 
 ```{r}
 library(DSEMr)

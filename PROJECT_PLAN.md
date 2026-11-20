@@ -2,15 +2,14 @@
 
 ## Definition of done
 
-DSEMr becomes a CRAN candidate only after every mandatory public DSEM and RDSEM
-example has a reproducible parity record or a scientifically justified,
-maintainer-approved exclusion. A compiled syntax construct is never treated as
-an implemented estimator feature.
+DSEMr becomes a CRAN candidate only after every core DSEM and RDSEM model family
+has a reproducible benchmark validation record or an explicit scope boundary.
+A compiled syntax construct is never treated as an implemented estimator feature.
 
 ## Milestone 1 — foundation and reference engine
 
-- R package, GPL-3 licensing, private GitHub repository, CI, release documents.
-- Common model representation with lavaan-style and clean-room Mplus-like
+- R package, GPL-3 licensing, GitHub repository, CI, release documents.
+- Common model representation with extended `lavaan` and section-based SEM
   frontends.
 - Gaussian N=1 AR(1) reference estimator and Rust sufficient-statistics kernel.
 - Deterministic chain and replication seeds; scheduler-aware compute manifest.
@@ -27,7 +26,7 @@ posterior draws agree; package tests, build, and local CRAN-style check pass.
   between-level regressions.
 - Missing-observation and irregular-interval policies with explicit initial
   condition handling.
-- Public parity records for Mplus 6.23–6.24 and 9.30–9.32 before expansion.
+- Public benchmark validation records for single-level and two-level DSEM before expansion.
 
 ## Milestone 3 — latent, categorical, and residual dynamics
 
@@ -44,9 +43,9 @@ posterior draws agree; package tests, build, and local CRAN-style check pass.
 - Deterministic distributed Monte Carlo and resource/oversubscription audits.
 - Benchmarks against the transparent R reference and regression thresholds.
 
-## Milestone 5 — parity and CRAN
+## Milestone 5 — benchmark validation and CRAN
 
-- Complete `docs/PARITY.md` and publish reproducible evidence bundles.
+- Complete `docs/PARITY.md` and publish reproducible validation evidence.
 - Simulation-based calibration, planned parameter recovery, bias and coverage.
 - Cross-platform source installation and offline native builds.
 - `cargo test`, fmt, Clippy, security audit, sanitizers/Valgrind where supported.
@@ -59,5 +58,5 @@ posterior draws agree; package tests, build, and local CRAN-style check pass.
 
 Development versions use `0.0.x.9000`. Internal tagged releases may expose
 experimental capabilities, but README and function-level status labels must
-remain explicit. Version `0.1.0` is reserved for the completed parity/CRAN gate.
+remain explicit. Version `0.1.0` is reserved for the completed validation and CRAN gate.
 

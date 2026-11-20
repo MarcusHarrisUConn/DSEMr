@@ -26,12 +26,12 @@ empty time bins. Attribute \code{"tinterval_info"} records observed versus
 inserted row counts and maximum timestamp shift.
 }
 \description{
-Implements clean-room time-interval discretization matching the Mplus
-\code{TINTERVAL} procedure (Asparouhov, Hamaker, & Muthen, 2018). Continuous or
-unequally spaced timestamps are mapped onto an integer grid of multiples of
-\code{delta}, preserving observation order within each cluster and inserting
-explicit \code{NA} rows at unobserved time bins so lagged transitions correspond
-to uniform elapsed time.
+Implements order-preserving time-interval discretization (\code{TINTERVAL};
+Asparouhov, Hamaker, & Muthen, 2018). Continuous or unequally spaced
+timestamps are mapped onto an integer grid of multiples of \code{delta},
+preserving observation order within each cluster and inserting explicit \code{NA}
+rows at unobserved time bins so lagged transitions correspond to uniform
+elapsed time.
 }
 \examples{
 irregular <- data.frame(

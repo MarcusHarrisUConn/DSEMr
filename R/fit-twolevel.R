@@ -2,19 +2,22 @@
                                 seed, compute, engine, control, call) {
   t <- model$terms
   meta <- model$term_meta
-  w_regs <- t[t$op == "~" & t$rhs != "1" & t$level == "within", , drop = FALSE]
-  b_regs <- t[t$op == "~" & t$rhs != "1" & t$level == "between", , drop = FALSE]
+  w_regs <- .dsem_active_regs(t, meta, "within")
+  b_regs <- .dsem_active_regs(t, meta, "between")
   w_vars <- t[t$op == "~~" & t$level == "within" & t$lhs == t$rhs, , drop = FALSE]
-  w_vars_meta <- if (!is.null(meta)) meta[t$op == "~~" & t$level == "within" & t$lhs == t$rhs, , drop = FALSE] else NULL
 
   # Check if simple legacy two-level AR(1) with engine = "R" (exact backward compatibility)
   outcomes <- unique(w_regs$lhs)
-  lags <- sort(unique(w_regs$lag[w_regs$lag > 0L]))
+  lags <- sort(unique(w_regs$lag[w_regs$lag > 0L & w_regs$rhs %in% outcomes]))
   if (!length(lags)) lags <- 1L
-  exog_w <- setdiff(unique(w_regs$rhs[w_regs$lag == 0L]), outcomes)
+  exog_specs <- .dsem_build_exog_specs(w_regs, outcomes)
+  exog_w <- exog_specs$key
+  exog_raw_vars <- unique(exog_specs$var)
   has_logv_any <- any(w_vars$random)
   is_basic_2l <- length(outcomes) == 1L &&
     nrow(w_regs) == 1L &&
+    !any(nzchar(w_regs$label)) &&
+    nrow(w_regs) == sum(t$op == "~" & t$rhs != "1" & t$level == "within") &&
     length(lags) == 1L && lags[1L] == 1L &&
     !length(exog_w) &&
     !nrow(b_regs) &&
@@ -22,6 +25,7 @@
     !any(t$residual) &&
     model$family == "gaussian" &&
     !length(model$categorical) &&
+    !length(model$censored) &&
     is.null(model$tinterval)
 
   if (engine == "auto") engine <- if (.dsem_rust_available()) "rust" else "R"
@@ -31,10 +35,10 @@
                                          seed, compute, control, call))
   }
 
-  # General Two-Level Location-Scale DSEM & RDSEM (Mplus 9.30-9.32, 9.37)
+  # General Two-Level Location-Scale, Multivariate VAR, Censored, & RDSEM
   id_col <- model$id[1L]
   d <- length(outcomes)
-  kx <- length(exog_w)
+  kx <- nrow(exog_specs)
   n_lags <- length(lags)
   n_sl_per_out <- n_lags * d + kx
 
@@ -51,9 +55,12 @@
         hit <- which(w_regs$lhs == out_j & w_regs$rhs == outcomes[m_col] & w_regs$lag == lags[l_idx])
         def_nm <- if (d == 1L) paste0("lag", lags[l_idx], "_", outcomes[m_col]) else paste0(out_j, "_on_lag", lags[l_idx], "_", outcomes[m_col])
       } else {
-        ex_nm <- exog_w[s_i - n_lags * d]
-        hit <- which(w_regs$lhs == out_j & w_regs$rhs == ex_nm & w_regs$lag == 0L)
-        def_nm <- if (d == 1L) ex_nm else paste0(out_j, "_on_", ex_nm)
+        k_ex <- s_i - n_lags * d
+        ex_var <- exog_specs$var[k_ex]
+        ex_lg <- exog_specs$lag[k_ex]
+        ex_key <- exog_specs$key[k_ex]
+        hit <- which(w_regs$lhs == out_j & w_regs$rhs == ex_var & w_regs$lag == ex_lg)
+        def_nm <- if (d == 1L) ex_key else paste0(out_j, "_on_", ex_key)
       }
       if (length(hit)) {
         is_r <- any(w_regs$random[hit]) || is_basic_2l
@@ -99,7 +106,7 @@
   kw <- length(exog_w_between)
   kz <- length(distal_z)
 
-  all_data_vars <- unique(c(outcomes, exog_w, exog_w_between, distal_z))
+  all_data_vars <- unique(c(outcomes, exog_raw_vars, exog_w_between, distal_z))
   .dsem_validate_data(data, id_col, model$time, all_data_vars,
                       allow_missing_vars = TRUE, categorical = cat_vars)
 
@@ -125,7 +132,7 @@
       steps <- round((t_vals - t_vals[1L]) / interval)
       if (all(abs((t_vals - t_vals[1L]) / interval - steps) < 1e-5) && max(steps) + 1L > length(rows) && max(steps) < 5000L) {
         sub_full <- data[rep(rows[1L], max(steps) + 1L), , drop = FALSE]
-        for (v_nm in unique(c(outcomes, exog_w))) is.na(sub_full[[v_nm]]) <- seq_len(nrow(sub_full))
+        for (v_nm in unique(c(outcomes, exog_raw_vars))) is.na(sub_full[[v_nm]]) <- seq_len(nrow(sub_full))
         sub_full[steps + 1L, ] <- data[rows, , drop = FALSE]
         cluster_pieces[[g]] <- sub_full
       } else {
@@ -166,14 +173,17 @@
       outcome_types[j] <- 0L
     }
   }
+  cens <- .dsem_resolve_censoring(model$censored, y_mat, outcomes, outcome_types)
+  outcome_types <- cens$outcome_types
 
-  x_mat <- matrix(0, n_obs, kx, dimnames = list(NULL, exog_w))
+  x_mat <- .dsem_build_exog_matrix(stacked, exog_specs, cluster_sizes)
   latent_center_x <- integer(kx)
   for (k in seq_len(kx)) {
-    xv <- as.double(stacked[[exog_w[k]]])
+    xv <- x_mat[, k]
     if (anyNA(xv)) xv[is.na(xv)] <- mean(xv, na.rm = TRUE)
-    if (identical(model$centering, "groupmean")) {
-      # Group-mean center within cluster
+    is_time_col <- !is.null(model$time) && identical(exog_specs$var[k], model$time)
+    target_var <- is.null(model$centered_vars) || (exog_specs$var[k] %in% model$centered_vars)
+    if (identical(model$centering, "groupmean") && !is_time_col && target_var) {
       pos <- 0L
       for (sz in cluster_sizes) {
         idx_c <- (pos + 1L):(pos + sz)
@@ -181,10 +191,10 @@
         pos <- pos + sz
       }
       latent_center_x[k] <- 0L
-    } else if (identical(model$centering, "grandmean")) {
+    } else if (identical(model$centering, "grandmean") && !is_time_col && target_var) {
       xv <- xv - mean(xv)
       latent_center_x[k] <- 0L
-    } else if (identical(model$centering, "latent") && !identical(exog_w[k], model$time)) {
+    } else if (identical(model$centering, "latent") && !is_time_col) {
       latent_center_x[k] <- 1L
     }
     x_mat[, k] <- xv
@@ -250,9 +260,22 @@
         )
       }
     }
-    for (j in seq_len(d)) {
-      if (has_random_logv[j] == 0L && outcome_types[j] < 2L) {
-        param_names <- c(param_names, if (d == 1L) "sigma2" else paste0("sigma2_", outcomes[j]))
+    use_full_sigma_w <- d > 1L && !any(has_random_logv == 1L) &&
+      !any(outcome_types >= 2L) && !any(outcome_types < 0L)
+    if (use_full_sigma_w) {
+      for (c_i in seq_len(d)) {
+        for (r_i in c_i:d) {
+          param_names <- c(
+            param_names,
+            if (r_i == c_i) paste0("sigma2_", outcomes[r_i]) else paste0("within_cov_", outcomes[r_i], "_", outcomes[c_i])
+          )
+        }
+      }
+    } else {
+      for (j in seq_len(d)) {
+        if (has_random_logv[j] == 0L && outcome_types[j] < 2L) {
+          param_names <- c(param_names, if (d == 1L) "sigma2" else paste0("sigma2_", outcomes[j]))
+        }
       }
     }
     for (m_z in seq_len(kz)) {
@@ -275,6 +298,7 @@
   payload <- list(
     y = y_mat, x = x_mat, cluster_sizes = as.integer(cluster_sizes),
     w = w_mat, z = z_mat, lags = as.integer(lags), masks = masks,
+    censor_lo = cens$lo, censor_hi = cens$hi,
     d = d, kx = kx, kw = kw, kz = kz, q_re = q_re, re_names = re_names,
     latent_center_y = !identical(model$centering, "none"),
     res_dyn = any(t$residual), pm_int = .dsem_prior_mode_int(prior$prior_mode),
@@ -317,7 +341,7 @@
     observed = obs_out, row_index = seq_len(n_obs),
     random_effects = re_means, random_effects_summary = re_summary,
     random_effect_draws = re_draws,
-    fit = list(log_lik = -0.5 * (dic_val - pd_val), dic = dic_val, pd = pd_val),
+    fit = .dsem_safe_fit_metrics(dic_val, pd_val),
     prior = prior, sampler = list(iter = iter, warmup = warmup, thin = thin, chains = chains),
     elapsed = elapsed, master_seed = seed,
     chain_seeds = vapply(chain_ids, function(i) .dsem_stable_seed(seed, paste(model$hash, "chain", i)), integer(1)),
@@ -340,8 +364,11 @@
       as.integer(payload$latent_center_y), as.integer(payload$res_dyn),
       payload$pm_int, payload$iter, payload$warmup, payload$thin, c_seed
     ))
-    hyper <- as.double(c(payload$prior$beta_sd, max(payload$prior$omega_df - payload$q_re, 1),
-                         mean(diag(payload$prior$omega_scale))))
+    hyper <- as.double(c(
+      payload$prior$beta_sd, max(payload$prior$omega_df - payload$q_re, 1),
+      mean(diag(payload$prior$omega_scale)),
+      payload$censor_lo, payload$censor_hi
+    ))
     raw <- dsem_rust_twolevel(
       as.double(payload$y), as.double(payload$x), payload$cluster_sizes,
       as.double(payload$w), as.double(payload$z), payload$lags, payload$masks, dims, hyper
