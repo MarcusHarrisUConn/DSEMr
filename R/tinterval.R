@@ -71,7 +71,7 @@ dsem_tinterval <- function(data, time, delta = 1, id = NULL, max_bins = 10000L) 
     sub <- sub[ord, , drop = FALSE]
     t_num <- t_num[ord]
     t0 <- t_num[1L]
-    # Order-preserving integer bin assignment (Mplus TINTERVAL rule)
+    # Order-preserving integer bin assignment (Asparouhov et al., 2018 TINTERVAL rule)
     raw_bins <- as.integer(floor((t_num - t0) / delta + 0.5 + 1e-12)) + 1L
     bins <- raw_bins
     if (length(bins) > 1L) {

@@ -91,10 +91,19 @@
     intersect(outcomes, model$categorical)
   }
 
+  shared_cov <- .dsem_detect_shared_cov_factor(model)
+  shared_cov_loadings <- if (!is.null(shared_cov)) {
+    as.double(shared_cov$loadings[outcomes])
+  } else {
+    numeric(0L)
+  }
+  logvf_name <- if (!is.null(shared_cov)) shared_cov$logvf_label else character()
+
   re_names <- c(
     outcomes,
     slope_names[slope_is_random == 1L],
-    logv_names[has_random_logv == 1L & !outcomes %in% cat_vars]
+    logv_names[has_random_logv == 1L & !outcomes %in% cat_vars],
+    logvf_name
   )
   q_re <- length(re_names)
 
@@ -224,9 +233,10 @@
     }
   }
 
+  default_pm <- if (!is.null(model$mplus_prior_mode)) model$mplus_prior_mode else "default"
   prior <- utils::modifyList(list(
     beta_mean = 0, beta_sd = 100, sigma_shape = 0.001, sigma_scale = 0.001,
-    omega_df = q_re + 2, omega_scale = diag(0.05, q_re), prior_mode = "default"
+    omega_df = q_re + 2, omega_scale = diag(0.05, q_re), prior_mode = default_pm
   ), control)
   prior <- .dsem_validate_prior(prior, control,
     c("beta_mean", "beta_sd", "sigma_shape", "sigma_scale", "omega_df", "omega_scale", "prior_mode"))
@@ -261,6 +271,7 @@
       }
     }
     use_full_sigma_w <- d > 1L && !any(has_random_logv == 1L) &&
+      !length(shared_cov_loadings) &&
       !any(outcome_types >= 2L) && !any(outcome_types < 0L)
     if (use_full_sigma_w) {
       for (c_i in seq_len(d)) {
@@ -289,6 +300,11 @@
       }
       param_names <- c(param_names, paste0("var_", zn))
     }
+    for (j in seq_len(d)) {
+      if (outcome_types[j] >= 3L) {
+        param_names <- c(param_names, paste0("threshold_", outcomes[j], "$", 2:(outcome_types[j] - 1L)))
+      }
+    }
   }
 
   masks <- as.integer(c(
@@ -299,6 +315,7 @@
     y = y_mat, x = x_mat, cluster_sizes = as.integer(cluster_sizes),
     w = w_mat, z = z_mat, lags = as.integer(lags), masks = masks,
     censor_lo = cens$lo, censor_hi = cens$hi,
+    shared_cov_loadings = shared_cov_loadings,
     d = d, kx = kx, kw = kw, kz = kz, q_re = q_re, re_names = re_names,
     latent_center_y = !identical(model$centering, "none"),
     res_dyn = any(t$residual), pm_int = .dsem_prior_mode_int(prior$prior_mode),
@@ -367,7 +384,8 @@
     hyper <- as.double(c(
       payload$prior$beta_sd, max(payload$prior$omega_df - payload$q_re, 1),
       mean(diag(payload$prior$omega_scale)),
-      payload$censor_lo, payload$censor_hi
+      payload$censor_lo, payload$censor_hi,
+      payload$shared_cov_loadings
     ))
     raw <- dsem_rust_twolevel(
       as.double(payload$y), as.double(payload$x), payload$cluster_sizes,

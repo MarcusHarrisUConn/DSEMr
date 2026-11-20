@@ -222,7 +222,7 @@ dsem_diagram <- function(object,
       info <- fmt_edge(cands, if (nzchar(lbl)) lbl else "")
       add_edge(from_id, to_id, info$label, if (lg > 0L) "dashed" else "solid", w_regs$random[r], lbl, info$sig)
     }
-    # Random log-variance indicator node (residual arrow with Mplus dot)
+    # Random log-variance indicator node (residual arrow with random-effect dot)
     lv_rows <- w_vars[w_vars$random, , drop = FALSE]
     for (k in seq_len(nrow(lv_rows))) {
       onm <- lv_rows$lhs[k]

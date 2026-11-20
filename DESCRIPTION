@@ -49,8 +49,13 @@ Imports:
     stats,
     utils
 Suggests:
+    bslib,
+    ggplot2,
+    haven,
     knitr,
+    readxl,
     rmarkdown,
+    shiny,
     spelling,
     testthat (>= 3.0.0),
     withr

@@ -46,7 +46,7 @@ test_that("cross-classified DSEM recovers AR slope, time shock variance, and sig
   expect_equal(mcc$level_type, "crossclassified")
   fcc <- dsem(mcc, dcc, chains = 2, iter = 260, warmup = 130, seed = 941)
   expect_equal(fcc$status, "validated-cross-classified-dsem")
-  expect_equal(unname(coef(fcc)["mean_lag1_y"]), 0.4, tolerance = 0.2)
+  expect_equal(unname(coef(fcc)["mean_s"]), 0.4, tolerance = 0.2)
   expect_equal(unname(coef(fcc)["sigma2"]), 0.36, tolerance = 0.2)
   expect_gt(unname(coef(fcc)["time_var_y"]), 0.01)
 })

@@ -15,8 +15,8 @@ pub struct CrossClassifiedOutput {
 }
 
 /// Cross-Classified DSEM (Subject x Time two-way random intercepts, selective random slopes
-/// across subjects and/or occasions, subject- and time-level predictors, and subject random logv
-/// via Newton-Laplace Independence MH).
+/// across subjects and/or occasions, selective subject- and time-level predictor regressions,
+/// subject random logv via Newton-Laplace Independence MH + PX scale move, and PSEM shrinkage).
 #[allow(clippy::too_many_arguments)]
 pub fn mcmc_crossclassified(
     y_grid: &[f64],          // (n_id * n_time) x d, ordered by id g=0..n_id, t=0..n_time
@@ -26,6 +26,8 @@ pub fn mcmc_crossclassified(
     slope_rand_id: &[i32],   // d * n_sl
     slope_rand_time: &[i32], // d * n_sl
     has_random_logv: &[i32], // d
+    re_id_on_w_mask: &[i32], // kw_id x q_id
+    re_time_on_w_mask: &[i32], // kw_time x q_time
     n_id: usize,
     n_time: usize,
     d: usize,
@@ -131,10 +133,25 @@ pub fn mcmc_crossclassified(
     let mut omega_id = eye(q_id, 0.1);
     let mut omega_time = eye(q_time, 0.1);
 
+    // PSEM Bayesian Lasso scale-mixture states (prior_mode == 2)
+    let mut psem_tau2_fsl = vec![1.0_f64; n_fixed_sl];
+    let mut psem_tau2_wid = vec![1.0_f64; kw_id * q_id];
+    let mut psem_tau2_wt = vec![1.0_f64; kw_time * q_time];
+    let mut psem_lambda2 = 1.0_f64;
+
+    let n_wid_active: usize = (0..q_id)
+        .flat_map(|q| (0..kw_id).map(move |k| (k, q)))
+        .filter(|&(k, q)| re_id_on_w_mask.get(idx(k, q, kw_id)).copied().unwrap_or(1) != 0)
+        .count();
+    let n_wt_active: usize = (0..q_time)
+        .flat_map(|q| (0..kw_time).map(move |k| (k, q)))
+        .filter(|&(k, q)| re_time_on_w_mask.get(idx(k, q, kw_time)).copied().unwrap_or(1) != 0)
+        .count();
+
     let n_om_id = q_id * (q_id + 1) / 2;
     let n_om_t = q_time * (q_time + 1) / 2;
     let n_params =
-        q_id + q_id * kw_id + q_time * kw_time + n_fixed_sl + n_om_id + n_om_t + n_fixed_sig;
+        q_id + n_wid_active + n_wt_active + n_fixed_sl + n_om_id + n_om_t + n_fixed_sig;
 
     let keep_indices: Vec<usize> = ((warmup + 1)..=iter)
         .filter(|i| (i - warmup - 1) % thin == 0)
@@ -176,7 +193,9 @@ pub fn mcmc_crossclassified(
             let mut th = g0.to_vec();
             for q in 0..q_id {
                 for k in 0..kw_id {
-                    th[q] += gw[idx(k, q, kw_id)] * w_id[idx(g, k, n_id)];
+                    if re_id_on_w_mask.get(idx(k, q, kw_id)).copied().unwrap_or(1) != 0 {
+                        th[q] += gw[idx(k, q, kw_id)] * w_id[idx(g, k, n_id)];
+                    }
                 }
                 th[q] += uid[idx(g, q, n_id)];
             }
@@ -188,7 +207,9 @@ pub fn mcmc_crossclassified(
             for q in 0..q_time {
                 let mut v = vt[idx(t, q, n_time)];
                 for k in 0..kw_time {
-                    v += gwt[idx(k, q, kw_time)] * w_time[idx(t, k, n_time)];
+                    if re_time_on_w_mask.get(idx(k, q, kw_time)).copied().unwrap_or(1) != 0 {
+                        v += gwt[idx(k, q, kw_time)] * w_time[idx(t, k, n_time)];
+                    }
                 }
                 out[q] = v;
             }
@@ -286,7 +307,9 @@ pub fn mcmc_crossclassified(
                 for j in 0..d {
                     base_mu[j] = gamma0[j];
                     for k in 0..kw_id {
-                        base_mu[j] += gamma_w_id[idx(k, j, kw_id)] * w_id[idx(g, k, n_id)];
+                        if re_id_on_w_mask.get(idx(k, j, kw_id)).copied().unwrap_or(1) != 0 {
+                            base_mu[j] += gamma_w_id[idx(k, j, kw_id)] * w_id[idx(g, k, n_id)];
+                        }
                     }
                 }
                 for j in 0..d {
@@ -478,7 +501,9 @@ pub fn mcmc_crossclassified(
                     } else {
                         let mut base_t = th_g[j];
                         for k in 0..kw_time {
-                            base_t += gamma_w_time[idx(k, j, kw_time)] * w_time[idx(t, k, n_time)];
+                            if re_time_on_w_mask.get(idx(k, j, kw_time)).copied().unwrap_or(1) != 0 {
+                                base_t += gamma_w_time[idx(k, j, kw_time)] * w_time[idx(t, k, n_time)];
+                            }
                         }
                         let r = y_work[idx(st + t, j, n_obs)] - base_t;
                         pr[idx(j, j, d)] += 1.0 / s2;
@@ -615,13 +640,20 @@ pub fn mcmc_crossclassified(
         }
 
         // 3. Update fixed slopes & fixed sigma2
-        let p_pr = if prior_mode == 1 {
+        let p_pr_base = if prior_mode == 1 {
             1e-10
         } else {
             1.0 / (beta_sd * beta_sd)
         };
         if n_fixed_sl > 0 {
-            let mut pr = eye(n_fixed_sl, p_pr);
+            let mut pr = vec![0.0; n_fixed_sl * n_fixed_sl];
+            for fi in 0..n_fixed_sl {
+                pr[idx(fi, fi, n_fixed_sl)] = if prior_mode == 2 {
+                    1.0 / psem_tau2_fsl[fi].max(1e-6)
+                } else {
+                    p_pr_base
+                };
+            }
             let mut inf = vec![0.0; n_fixed_sl];
             let mut rv = vec![0.0; n_sl];
             for g in 0..n_id {
@@ -697,18 +729,25 @@ pub fn mcmc_crossclassified(
             }
         }
 
-        // 4. Update gamma0, gamma_w_id, gamma_w_time, omega_id, omega_time (with SUR conditioning)
-        let pw_id = 1 + kw_id;
+        // 4. Update gamma0, selective gamma_w_id, selective gamma_w_time, PSEM Lasso, omega_id, omega_time
         for q in 0..q_id {
             let o_qq = om_id_inv[idx(q, q, q_id)].max(1e-8);
+            let mut active_k: Vec<usize> = Vec::new();
+            for k in 0..kw_id {
+                if re_id_on_w_mask.get(idx(k, q, kw_id)).copied().unwrap_or(1) != 0 {
+                    active_k.push(k);
+                }
+            }
+            let pw_id = 1 + active_k.len();
             let mut wd = vec![0.0; n_id * pw_id];
             let mut yv = vec![0.0; n_id];
             for g in 0..n_id {
                 wd[idx(g, 0, n_id)] = 1.0;
                 let mut tot = gamma0[q] + u_id[idx(g, q, n_id)];
-                for k in 0..kw_id {
-                    wd[idx(g, 1 + k, n_id)] = w_id[idx(g, k, n_id)];
-                    tot += gamma_w_id[idx(k, q, kw_id)] * w_id[idx(g, k, n_id)];
+                for (ai, &k) in active_k.iter().enumerate() {
+                    let wv = w_id[idx(g, k, n_id)];
+                    wd[idx(g, 1 + ai, n_id)] = wv;
+                    tot += gamma_w_id[idx(k, q, kw_id)] * wv;
                 }
                 for q2 in 0..q_id {
                     if q2 != q {
@@ -726,8 +765,14 @@ pub fn mcmc_crossclassified(
             for i in 0..(pw_id * pw_id) {
                 pr[i] = wtw[i] * o_qq;
             }
-            for i in 0..pw_id {
-                pr[idx(i, i, pw_id)] += p_pr;
+            pr[idx(0, 0, pw_id)] += p_pr_base;
+            for (ai, &k) in active_k.iter().enumerate() {
+                let pk = if prior_mode == 2 {
+                    1.0 / psem_tau2_wid[idx(k, q, kw_id)].max(1e-6)
+                } else {
+                    p_pr_base
+                };
+                pr[idx(1 + ai, 1 + ai, pw_id)] += pk;
             }
             let inf: Vec<f64> = wty.iter().map(|v| v * o_qq).collect();
             let b = rmvnorm_precision(&mut rng, &pr, &inf, pw_id);
@@ -735,11 +780,14 @@ pub fn mcmc_crossclassified(
             let old_gw: Vec<f64> = (0..kw_id).map(|k| gamma_w_id[idx(k, q, kw_id)]).collect();
             gamma0[q] = b[0];
             for k in 0..kw_id {
-                gamma_w_id[idx(k, q, kw_id)] = b[1 + k];
+                gamma_w_id[idx(k, q, kw_id)] = 0.0;
+            }
+            for (ai, &k) in active_k.iter().enumerate() {
+                gamma_w_id[idx(k, q, kw_id)] = b[1 + ai];
             }
             for g in 0..n_id {
                 let mut dl = old_g0 - gamma0[q];
-                for k in 0..kw_id {
+                for &k in &active_k {
                     dl += (old_gw[k] - gamma_w_id[idx(k, q, kw_id)]) * w_id[idx(g, k, n_id)];
                 }
                 u_id[idx(g, q, n_id)] += dl;
@@ -748,14 +796,28 @@ pub fn mcmc_crossclassified(
 
         if kw_time > 0 {
             for q in 0..q_time {
+                let mut active_k: Vec<usize> = Vec::new();
+                for k in 0..kw_time {
+                    if re_time_on_w_mask.get(idx(k, q, kw_time)).copied().unwrap_or(1) != 0 {
+                        active_k.push(k);
+                    }
+                }
+                if active_k.is_empty() {
+                    for k in 0..kw_time {
+                        gamma_w_time[idx(k, q, kw_time)] = 0.0;
+                    }
+                    continue;
+                }
+                let pa = active_k.len();
                 let o_qq = om_t_inv[idx(q, q, q_time)].max(1e-8);
-                let mut wt = vec![0.0; n_time * kw_time];
+                let mut wt = vec![0.0; n_time * pa];
                 let mut yv = vec![0.0; n_time];
                 for t in 0..n_time {
                     let mut tot = v_time[idx(t, q, n_time)];
-                    for k in 0..kw_time {
-                        wt[idx(t, k, n_time)] = w_time[idx(t, k, n_time)];
-                        tot += gamma_w_time[idx(k, q, kw_time)] * w_time[idx(t, k, n_time)];
+                    for (ai, &k) in active_k.iter().enumerate() {
+                        let wv = w_time[idx(t, k, n_time)];
+                        wt[idx(t, ai, n_time)] = wv;
+                        tot += gamma_w_time[idx(k, q, kw_time)] * wv;
                     }
                     for q2 in 0..q_time {
                         if q2 != q {
@@ -767,26 +829,34 @@ pub fn mcmc_crossclassified(
                     }
                     yv[t] = tot;
                 }
-                let wtw = mat_t_mul(&wt, &wt, kw_time, n_time, kw_time);
-                let wty = mat_t_mul(&wt, &yv, kw_time, n_time, 1);
-                let mut pr = vec![0.0; kw_time * kw_time];
-                for i in 0..(kw_time * kw_time) {
+                let wtw = mat_t_mul(&wt, &wt, pa, n_time, pa);
+                let wty = mat_t_mul(&wt, &yv, pa, n_time, 1);
+                let mut pr = vec![0.0; pa * pa];
+                for i in 0..(pa * pa) {
                     pr[i] = wtw[i] * o_qq;
                 }
-                for i in 0..kw_time {
-                    pr[idx(i, i, kw_time)] += p_pr;
+                for (ai, &k) in active_k.iter().enumerate() {
+                    let pk = if prior_mode == 2 {
+                        1.0 / psem_tau2_wt[idx(k, q, kw_time)].max(1e-6)
+                    } else {
+                        p_pr_base
+                    };
+                    pr[idx(ai, ai, pa)] += pk;
                 }
                 let inf: Vec<f64> = wty.iter().map(|v| v * o_qq).collect();
-                let b = rmvnorm_precision(&mut rng, &pr, &inf, kw_time);
+                let b = rmvnorm_precision(&mut rng, &pr, &inf, pa);
                 let old_gw: Vec<f64> = (0..kw_time)
                     .map(|k| gamma_w_time[idx(k, q, kw_time)])
                     .collect();
                 for k in 0..kw_time {
-                    gamma_w_time[idx(k, q, kw_time)] = b[k];
+                    gamma_w_time[idx(k, q, kw_time)] = 0.0;
+                }
+                for (ai, &k) in active_k.iter().enumerate() {
+                    gamma_w_time[idx(k, q, kw_time)] = b[ai];
                 }
                 for t in 0..n_time {
                     let mut dl = 0.0;
-                    for k in 0..kw_time {
+                    for &k in &active_k {
                         dl += (old_gw[k] - gamma_w_time[idx(k, q, kw_time)])
                             * w_time[idx(t, k, n_time)];
                     }
@@ -795,7 +865,58 @@ pub fn mcmc_crossclassified(
             }
         }
 
-        let mut sid = eye(q_id, 0.05);
+        // Update PSEM Bayesian Lasso hyperparameters (prior_mode == 2)
+        if prior_mode == 2 {
+            let mut sum_tau2 = 0.0;
+            let mut n_pen = 0usize;
+            for fi in 0..n_fixed_sl {
+                let b = fixed_slopes[fi].abs().max(1e-6);
+                let inv_t2 = rng.rinv_gaussian(psem_lambda2.sqrt() / b, psem_lambda2);
+                psem_tau2_fsl[fi] = (1.0 / inv_t2.max(1e-8)).clamp(1e-6, 1e6);
+                sum_tau2 += psem_tau2_fsl[fi];
+                n_pen += 1;
+            }
+            for q in 0..q_id {
+                for k in 0..kw_id {
+                    if re_id_on_w_mask.get(idx(k, q, kw_id)).copied().unwrap_or(1) != 0 {
+                        let b = gamma_w_id[idx(k, q, kw_id)].abs().max(1e-6);
+                        let inv_t2 = rng.rinv_gaussian(psem_lambda2.sqrt() / b, psem_lambda2);
+                        psem_tau2_wid[idx(k, q, kw_id)] = (1.0 / inv_t2.max(1e-8)).clamp(1e-6, 1e6);
+                        sum_tau2 += psem_tau2_wid[idx(k, q, kw_id)];
+                        n_pen += 1;
+                    }
+                }
+            }
+            for q in 0..q_time {
+                for k in 0..kw_time {
+                    if re_time_on_w_mask.get(idx(k, q, kw_time)).copied().unwrap_or(1) != 0 {
+                        let b = gamma_w_time[idx(k, q, kw_time)].abs().max(1e-6);
+                        let inv_t2 = rng.rinv_gaussian(psem_lambda2.sqrt() / b, psem_lambda2);
+                        psem_tau2_wt[idx(k, q, kw_time)] = (1.0 / inv_t2.max(1e-8)).clamp(1e-6, 1e6);
+                        sum_tau2 += psem_tau2_wt[idx(k, q, kw_time)];
+                        n_pen += 1;
+                    }
+                }
+            }
+            if n_pen > 0 {
+                psem_lambda2 = rng
+                    .rgamma(1.0 + n_pen as f64, 1.0 + 0.5 * sum_tau2)
+                    .clamp(1e-4, 1e4);
+            }
+        }
+
+        let psi0_diag = if prior_mode == 1 { 1e-5 } else { 0.05 };
+        let nu0_id = if prior_mode == 1 {
+            -(q_id as f64 + 1.0)
+        } else {
+            q_id as f64 + 2.0
+        };
+        let nu0_t = if prior_mode == 1 {
+            -(q_time as f64 + 1.0)
+        } else {
+            q_time as f64 + 2.0
+        };
+        let mut sid = eye(q_id, psi0_diag);
         for g in 0..n_id {
             for ca in 0..q_id {
                 for ra in 0..q_id {
@@ -803,9 +924,82 @@ pub fn mcmc_crossclassified(
                 }
             }
         }
-        omega_id = rinv_wishart(&mut rng, (q_id as f64 + 2.0) + n_id as f64, &sid, q_id);
+        let df_id = (n_id as f64 + nu0_id).max(q_id as f64 + 1.0);
+        omega_id = rinv_wishart(&mut rng, df_id, &sid, q_id);
 
-        let mut st_m = eye(q_time, 0.05);
+        // Exact PX Scale Group Move on subject random log-variances in omega_id!
+        if n_lv > 0 {
+            let mut om_id_inv_px = spd_invert(&omega_id, q_id);
+            for t in 0..n_time {
+                let v_t = build_vt_tot(t, &gamma_w_time, &v_time);
+                for q in 0..q_time {
+                    vt_tot[idx(t, q, n_time)] = v_t[q];
+                }
+            }
+            for j in 0..d {
+                if lv_id_idx[j] < 0 {
+                    continue;
+                }
+                let q_lv = lv_id_idx[j] as usize;
+                let ne = (n_time - max_lag) as f64;
+                let mut base_v = vec![0.0; n_id];
+                let mut u_v = vec![0.0; n_id];
+                let mut rss_v = vec![0.0; n_id];
+                for g in 0..n_id {
+                    let st = g * n_time;
+                    let th_g = build_th_id(g, &gamma0, &gamma_w_id, &u_id);
+                    u_v[g] = u_id[idx(g, q_lv, n_id)];
+                    base_v[g] = th_g[q_lv] - u_v[g];
+                    let mut rss = 0.0;
+                    for t in max_lag..n_time {
+                        let fv = cell_mean(&y_work, st, t, j, &th_g, &vt_tot, &fixed_slopes);
+                        let e = y_work[idx(st + t, j, n_obs)] - fv;
+                        rss += e * e;
+                    }
+                    rss_v[g] = rss;
+                }
+                for _ in 0..3 {
+                    let delta = 0.18 * rng.rnorm();
+                    let a = delta.exp();
+                    let inv_a2 = (-2.0 * delta).exp();
+                    let mut valid = true;
+                    let mut ll_diff = 0.0;
+                    for g in 0..n_id {
+                        let cur_lv = base_v[g] + u_v[g];
+                        let prop_lv = base_v[g] + a * u_v[g];
+                        if prop_lv.abs() > 10.0 {
+                            valid = false;
+                            break;
+                        }
+                        ll_diff += -0.5 * ne * (prop_lv - cur_lv)
+                            - 0.5
+                                * ((-prop_lv).exp().min(1e12) - (-cur_lv).exp().min(1e12))
+                                * rss_v[g];
+                    }
+                    if !valid {
+                        continue;
+                    }
+                    let om_qq = om_id_inv_px[idx(q_lv, q_lv, q_id)];
+                    let log_acc =
+                        ll_diff - nu0_id * delta - 0.5 * psi0_diag * (inv_a2 - 1.0) * om_qq;
+                    if log_acc.is_finite() && (log_acc >= 0.0 || rng.runif().ln() < log_acc) {
+                        for g in 0..n_id {
+                            u_v[g] *= a;
+                            u_id[idx(g, q_lv, n_id)] = u_v[g];
+                        }
+                        let inv_a = 1.0 / a;
+                        for r in 0..q_id {
+                            omega_id[idx(r, q_lv, q_id)] *= a;
+                            omega_id[idx(q_lv, r, q_id)] *= a;
+                            om_id_inv_px[idx(r, q_lv, q_id)] *= inv_a;
+                            om_id_inv_px[idx(q_lv, r, q_id)] *= inv_a;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut st_m = eye(q_time, psi0_diag);
         for t in 0..n_time {
             for ca in 0..q_time {
                 for ra in 0..q_time {
@@ -814,12 +1008,8 @@ pub fn mcmc_crossclassified(
                 }
             }
         }
-        omega_time = rinv_wishart(
-            &mut rng,
-            (q_time as f64 + 2.0) + n_time as f64,
-            &st_m,
-            q_time,
-        );
+        let df_t = (n_time as f64 + nu0_t).max(q_time as f64 + 1.0);
+        omega_time = rinv_wishart(&mut rng, df_t, &st_m, q_time);
 
         let _ = &id_sl_flats;
 
@@ -839,14 +1029,18 @@ pub fn mcmc_crossclassified(
             }
             for q in 0..q_id {
                 for k in 0..kw_id {
-                    draws[idx(keep_pos, cur, n_keep)] = gamma_w_id[idx(k, q, kw_id)];
-                    cur += 1;
+                    if re_id_on_w_mask.get(idx(k, q, kw_id)).copied().unwrap_or(1) != 0 {
+                        draws[idx(keep_pos, cur, n_keep)] = gamma_w_id[idx(k, q, kw_id)];
+                        cur += 1;
+                    }
                 }
             }
             for q in 0..q_time {
                 for k in 0..kw_time {
-                    draws[idx(keep_pos, cur, n_keep)] = gamma_w_time[idx(k, q, kw_time)];
-                    cur += 1;
+                    if re_time_on_w_mask.get(idx(k, q, kw_time)).copied().unwrap_or(1) != 0 {
+                        draws[idx(keep_pos, cur, n_keep)] = gamma_w_time[idx(k, q, kw_time)];
+                        cur += 1;
+                    }
                 }
             }
             for &fs in &fixed_slopes {

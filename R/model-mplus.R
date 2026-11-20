@@ -2,7 +2,7 @@
   raw <- unlist(strsplit(model, "\n", fixed = TRUE), use.names = FALSE)
   raw <- sub("!.*$", "", raw)
   text <- paste(raw, collapse = "\n")
-  sec_pat <- "(?:^|(?<=\\s|;))(TITLE|DATA|VARIABLE|DEFINE|ANALYSIS|MODEL\\s+PRIORS|MODEL|OUTPUT|PLOT|SAVEDATA|MONTECARLO)\\s*:"
+  sec_pat <- "(?:^|(?<=\\s|;))(TITLE|DATA|VARIABLE|DEFINE|ANALYSIS|MODEL\\s+PRIORS|MODEL\\s+CONSTRAINT|MODEL\\s+TEST|MODEL|OUTPUT|PLOT|SAVEDATA|MONTECARLO)\\s*:"
   sections <- gregexpr(sec_pat, text, ignore.case = TRUE, perl = TRUE)[[1L]]
   if (identical(sections, -1L)) {
     if (grepl("[A-Za-z]+\\s*:", text)) {
@@ -38,6 +38,10 @@
   mplus_centered_vars <- character()
   mplus_level_type <- NULL
   mplus_prior_mode <- NULL
+  mplus_algorithm <- NULL
+  mplus_define_ops <- list()
+  mplus_constraints <- character()
+  mplus_tests <- character()
 
   # Parse ANALYSIS section
   if (!is.null(bodies[["ANALYSIS"]])) {
@@ -54,11 +58,14 @@
         } else if (val %in% c("GENERAL", "RANDOM", "BAYES")) {
           # valid single-level or estimator alias
         } else {
-          .dsem_abort("Unsupported Mplus ANALYSIS TYPE: `%s`.", st)
+          .dsem_abort("Unsupported ANALYSIS TYPE: `%s`.", st)
         }
-      } else if (grepl("^(ESTIMATOR|PROCESSORS|BITERATIONS|FBITERATIONS|CHAINS|THIN|ALGORITHM|POINT|BSEED|BCONVERGENCE|PRIOR)\\s*(=|IS)", st, ignore.case = TRUE)) {
+      } else if (grepl("^(ESTIMATOR|PROCESSORS|BITERATIONS|FBITERATIONS|CHAINS|THIN|ALGORITHM|POINT|BSEED|BCONVERGENCE|PRIOR|CONVERGENCE|STSCALE|BSCALE)\\s*(=|IS)", st, ignore.case = TRUE)) {
         if (grepl("^PRIOR\\s*(=|IS)\\s*PSEM", st, ignore.case = TRUE)) {
           mplus_prior_mode <- "penalized"
+        }
+        if (grepl("^ALGORITHM\\s*(=|IS)\\s*", st, ignore.case = TRUE)) {
+          mplus_algorithm <- toupper(trimws(sub("^ALGORITHM\\s*(=|IS)\\s*", "", st, ignore.case = TRUE)))
         }
       } else {
         .dsem_abort("Unsupported ANALYSIS statement: `%s`.", st)
@@ -138,7 +145,7 @@
     }
   }
 
-  # Parse DEFINE section (CENTER x (GROUPMEAN [cluster] | GRANDMEAN))
+  # Parse DEFINE section (CENTER, STANDARDIZE, and variable creation/transformation)
   if (!is.null(bodies[["DEFINE"]])) {
     stmts <- trimws(unlist(strsplit(bodies[["DEFINE"]], ";", fixed = TRUE)))
     for (st in stmts[nzchar(stmts)]) {
@@ -153,6 +160,18 @@
         var_part <- trimws(sub("\\([^)]*\\)$", "", sub("^CENTER\\s+", "", st_clean, ignore.case = TRUE)))
         toks <- unlist(lapply(strsplit(var_part, "\\s+")[[1L]], .dsem_expand_mplus_range, symbols = symbol_order))
         mplus_centered_vars <- unique(c(mplus_centered_vars, toks))
+      } else if (grepl("^STANDARDIZE\\s+", st_clean, ignore.case = TRUE)) {
+        var_part <- trimws(sub("^STANDARDIZE\\s+", "", st_clean, ignore.case = TRUE))
+        toks <- unlist(lapply(strsplit(var_part, "\\s+")[[1L]], .dsem_expand_mplus_range, symbols = symbol_order))
+        mplus_define_ops[[length(mplus_define_ops) + 1L]] <- list(type = "standardize", vars = toks)
+      } else if (grepl("^[.A-Za-z][.A-Za-z0-9_]*\\s*=\\s*.+$", st_clean)) {
+        eq_pos <- regexpr("=", st_clean, fixed = TRUE)
+        lhs_v <- trimws(substr(st_clean, 1L, eq_pos - 1L))
+        rhs_e <- trimws(substr(st_clean, eq_pos + 1L, nchar(st_clean)))
+        add_symbols(lhs_v)
+        mplus_define_ops[[length(mplus_define_ops) + 1L]] <- list(
+          type = "assign", lhs = lhs_v, expr = rhs_e
+        )
       } else {
         .dsem_abort("Unsupported DEFINE statement: `%s`.", st_clean)
       }
@@ -347,11 +366,21 @@
       next
     }
 
-    # Case 4: Factor measurement `BY` (`f BY y1-y4*(&1 1-4)`, `f BY y@1(&1)`)
+    # Case 4: Factor measurement `BY` (`f BY y1-y4*(&1 1-4)`, `f BY y@1(&1)`, `s1-s3 | f BY y1-y3 (&1)`)
     if (grepl("\\bBY\\b", chunk, ignore.case = TRUE)) {
       bits <- strsplit(chunk, "(?i)\\s+BY\\s+", perl = TRUE)[[1L]]
-      if (length(bits) != 2L) .dsem_abort("Ambiguous Mplus BY statement: `%s`.", chunk)
-      fac_name <- trimws(bits[1L])
+      if (length(bits) != 2L) .dsem_abort("Ambiguous BY statement: `%s`.", chunk)
+      lhs_seg <- trimws(bits[1L])
+      loading_names <- character()
+      rand_loading <- FALSE
+      if (grepl("\\|", lhs_seg)) {
+        pbits <- strsplit(lhs_seg, "\\|")[[1L]]
+        loading_names <- .dsem_expand_mplus_list(trimws(pbits[1L]), symbol_order)
+        add_symbols(loading_names)
+        lhs_seg <- trimws(pbits[2L])
+        rand_loading <- TRUE
+      }
+      fac_name <- lhs_seg
       add_symbols(fac_name)
       if (length(lag_decl)) {
         for (lg in lag_decl) {
@@ -367,16 +396,20 @@
         add_symbols(pt$names)
         for (iname in pt$names) {
           item_idx <- item_idx + 1L
-          # Mplus default marker rule: first indicator in BY is @1 unless `*` or `@val` was specified
           fval <- pt$fixed
           ffree <- pt$free
-          if (item_idx == 1L && !pt$explicit_free && is.na(fval)) {
+          if (!rand_loading && item_idx == 1L && !pt$explicit_free && is.na(fval)) {
             fval <- 1.0
             ffree <- FALSE
           }
+          lname <- if (length(loading_names)) {
+            loading_names[min(item_idx, length(loading_names))]
+          } else ""
           eq_l <- if (length(eq_labels)) eq_labels[min(item_idx, length(eq_labels))] else ""
-          terms <- .dsem_add_term(terms, level, fac_name, "=~", iname, label = eq_l)
-          meta <- .dsem_add_meta(meta, fval, ffree, "", FALSE, eq_l)
+          lbl <- if (nzchar(lname)) lname else eq_l
+          terms <- .dsem_add_term(terms, level, fac_name, "=~", iname,
+                                  random = rand_loading, label = lbl)
+          meta <- .dsem_add_meta(meta, fval, ffree, lname, FALSE, eq_l)
         }
       }
       next
@@ -448,6 +481,43 @@
     terms$level[terms$level == "between"] <- "between_2"
   }
 
+  # Parse MODEL CONSTRAINT (NEW(...) definitions & derived parameter equations)
+  if (!is.null(bodies[["MODEL CONSTRAINT"]])) {
+    stmts <- trimws(unlist(strsplit(bodies[["MODEL CONSTRAINT"]], ";", fixed = TRUE)))
+    new_vars <- character()
+    for (st in stmts[nzchar(stmts)]) {
+      st_clean <- .dsem_trim(gsub("\n", " ", st))
+      if (grepl("^NEW\\s*\\(", st_clean, ignore.case = TRUE)) {
+        inner <- sub("^NEW\\s*\\(([^)]*)\\).*$", "\\1", st_clean, ignore.case = TRUE)
+        new_vars <- c(new_vars, trimws(unlist(strsplit(inner, "[\\s,]+", perl = TRUE))))
+        next
+      }
+      if (grepl("=", st_clean, fixed = TRUE)) {
+        eq_pos <- regexpr("=", st_clean, fixed = TRUE)
+        lhs <- trimws(substr(st_clean, 1L, eq_pos - 1L))
+        rhs <- gsub("**", "^", trimws(substr(st_clean, eq_pos + 1L, nchar(st_clean))), fixed = TRUE)
+        if (nzchar(lhs) && nzchar(rhs)) {
+          if (lhs %in% new_vars || grepl("^[A-Za-z_.][A-Za-z0-9_.]*$", lhs)) {
+            entry <- stats::setNames(rhs, lhs)
+            mplus_constraints <- c(mplus_constraints, entry)
+          } else {
+            mplus_constraints <- c(mplus_constraints, paste0("(", lhs, ") - (", rhs, ")"))
+          }
+        }
+      }
+    }
+  }
+  # Parse MODEL TEST (joint Bayesian Wald test constraints)
+  if (!is.null(bodies[["MODEL TEST"]])) {
+    stmts <- trimws(unlist(strsplit(bodies[["MODEL TEST"]], ";", fixed = TRUE)))
+    for (st in stmts[nzchar(stmts)]) {
+      st_clean <- gsub("**", "^", .dsem_trim(gsub("\n", " ", st)), fixed = TRUE)
+      if (grepl("=", st_clean, fixed = TRUE)) {
+        mplus_tests <- c(mplus_tests, st_clean)
+      }
+    }
+  }
+
   list(
     terms = terms,
     term_meta = meta,
@@ -465,7 +535,11 @@
     mplus_centering = mplus_centering,
     mplus_centered_vars = if (length(mplus_centered_vars)) mplus_centered_vars else NULL,
     mplus_level_type = mplus_level_type,
-    mplus_prior_mode = mplus_prior_mode
+    mplus_prior_mode = mplus_prior_mode,
+    mplus_algorithm = mplus_algorithm,
+    mplus_define_ops = mplus_define_ops,
+    mplus_constraints = mplus_constraints,
+    mplus_tests = mplus_tests
   )
 }
 

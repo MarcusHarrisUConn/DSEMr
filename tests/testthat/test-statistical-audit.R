@@ -65,7 +65,7 @@ test_that("unsupported terms and malformed controls cannot be silently fitted", 
   expect_error(dsem("y ~ lag(y, 1)", d, iter = 30.5), "iter")
   expect_error(dsem("y ~ lag(y, 1)", d, control = list(typo = 1)), "Unsupported control")
   expect_error(dsem_model("f =~ badmod*y + x\nf ~ lag(f, 1)"), "modifier")
-  expect_error(dsem_model("ANALYSIS: TYPE = BOGUS; MODEL: y ON y&1;", syntax = "mplus"), "Unsupported Mplus")
+  expect_error(dsem_model("ANALYSIS: TYPE = BOGUS; MODEL: y ON y&1;", syntax = "mplus"), "Unsupported ANALYSIS TYPE")
   expect_error(dsem("y ~ lag(y, 1)", transform(d, y = factor(y))), "numeric")
   expect_error(dsem("y ~ lag(y, 1)", transform(d, y = Inf)), "finite")
 })

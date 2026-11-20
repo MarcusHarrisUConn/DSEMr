@@ -11,13 +11,15 @@
 | N=1 Binary & Ordinal Probit DSEM / Dynamic IRT | Albert & Chib (1993); Asparouhov et al. (2018) | Yes | Yes | Validated |
 | N=1 & Two-Level Tobit Censored DSEM (floor/ceiling/interval censoring) | Bayesian Tobit data augmentation | Yes | Yes | Validated |
 | N=1 Multivariate Cross-Lagged Multi-Factor Dynamic SEM | Asparouhov, Hamaker, & Muthén (2018) | Yes | Yes | Validated |
-| Two-Level Location-Scale DSEM (latent centering, random slopes & `logv`, between predictors, distal outcomes, short-T stationary MH) | Asparouhov et al. (2018); McNeish & Hamaker (2020); Asparouhov (2026) | Yes | Yes | Validated |
-| Two-Level Multivariate Cross-Lagged VAR with Correlated Within Innovations ($\Sigma_W$) | Schuurman et al. (2016); Asparouhov et al. (2018) | Yes | Yes | Validated |
-| Two-Level Single-Indicator Measurement Error, ARMA(1,1), Dynamic CFA, Dynamic IRT (cross-level invariance), & Multi-Factor Cross-Lagged SEM | Asparouhov, Hamaker, & Muthén (2018) | Yes | Yes | Validated |
-| Residual DSEM (`RDSEM`: `residual(lag(y, 1))` / `y^ ON y^1`) | Asparouhov & Muthén (2020) | Yes | Yes | Validated |
-| Cross-Classified DSEM (`TYPE = CROSSCLASSIFIED RANDOM`) with selective subject/occasion random slopes & time-level predictors | Asparouhov, Hamaker, & Muthén (2018) | Yes | Yes | Validated |
-| Three-Level DSEM (`TYPE = THREELEVEL RANDOM` / DSEM3) with 3-level latent decomposition & simultaneous two-level block Gibbs | Asparouhov & Muthén (2026) | Yes | Yes | Validated |
-| **Diagnostics & Post-Estimation:** `TINTERVAL` grid alignment, `DIC`/`pD`, cluster-averaged & cluster-specific `STDYX`/`STDY`/`STD`, Bayesian $R^2$, posterior partial correlations, derived hypothesis & Wald tests, IRFs, cluster rankings, `VIF`, `PSEM` Lasso priors, split-$\hat{R}$, PSR, bulk/tail ESS, MCSE, one-tailed $p$-values | Gelman et al. (2013); Schuurman et al. (2016); Asparouhov & Muthén (2025) | Yes | Yes | Validated |
+| Two-Level Location-Scale DSEM (latent centering, random slopes & `logv`, PX scale moves, between predictors, distal outcomes, short-T stationary MH) | Asparouhov et al. (2018); McNeish & Hamaker (2020); Asparouhov (2026) | Yes | Yes | Validated |
+| Two-Level Multivariate Cross-Lagged VAR with Correlated Within Innovations ($\Sigma_W$) & Random Residual Covariances (`logvf`) | Schuurman et al. (2016); Asparouhov et al. (2018) | Yes | Yes | Validated |
+| Two-Level Single-Indicator Measurement Error, Exact Collapsed ARMA(1,1), Dynamic CFA, Dynamic IRT (cross-level invariance), & Multi-Factor Cross-Lagged SEM | Asparouhov, Hamaker, & Muthén (2018) | Yes | Yes | Validated |
+| Two-Level Binary & Ordinal ($K \ge 3$) Probit DSEM | Albert & Chib (1993); Asparouhov et al. (2018) | Yes | Yes | Validated |
+| Residual DSEM (`RDSEM`: `residual(lag(y, 1))` / `y^ ON y^1`) across 1L, 2L, & 3L | Asparouhov & Muthén (2020) | Yes | Yes | Validated |
+| Cross-Classified DSEM (`TYPE = CROSSCLASSIFIED RANDOM`), `DEFINE` transforms, Cross-Classified Dynamic CFA, & Random Factor Loadings | Asparouhov, Hamaker, & Muthén (2018) | Yes | Yes | Validated |
+| Three-Level DSEM (`THREELEVEL RANDOM` / DSEM3): 3-level latent centering, simultaneous two-level block Gibbs, Level-2 AR(1), 3L random residual covariance, & PSEM Lasso | Asparouhov & Muthén (2026) | Yes | Yes | Validated |
+| Continuous-Time DSEM (`dsem_ct()`, irregular $\Delta t$, Ornstein–Uhlenbeck drift/diffusion via Padé `[6/6]` $\exp(A \Delta t)$ & Lyapunov covariance, CT-IRF) | Oud & Jansen (2000); Asparouhov & Muthén (2025) | Yes | Yes | Validated |
+| **Diagnostics, Studio & Post-Estimation:** `run_dsemr()` interactive Shiny Studio, `TINTERVAL` grid alignment, `DIC`/`pD`, `STDYX`/`STDY`/`STD`, Bayesian $R^2$, partial correlations, `MODEL CONSTRAINT`/`TEST` & Wald tests, IRFs, cluster rankings, `VIF`, `PSEM` Lasso, strict Monte Carlo convergence | Gelman et al. (2013); Schuurman et al. (2016); Asparouhov & Muthén (2025) | Yes | Yes | Validated |
 
 ## Installation
 
@@ -78,7 +80,8 @@ dsem_dic(fit3)
 ## Public API
 
 - **Model Specification:** `dsem_model()`, `mplus_to_dsem()`, `dsem_spec()`, `as_dsem_model()` — extended `lavaan` formulas, section-based SEM script import, and declarative GUI-ready model specifications
-- **Estimation & Grid Alignment:** `dsem()`, `dsem_tinterval()` — compiled Rust Bayesian MCMC estimation and order-preserving time-interval alignment
+- **Estimation & Grid Alignment:** `dsem()`, `dsem_ct()` (Continuous-Time DSEM), `dsem_tinterval()` — compiled Rust Bayesian MCMC estimation and order-preserving time-interval alignment
+- **Interactive Shiny Studio:** `run_dsemr()` — 5-tab guided workflow for data design, visual model building, Rust MCMC estimation & diagnostics, post-estimation analytics, and Quarto/R reproducibility bundle export
 - **Standardization & Post-Estimation Analytics:**
   - `dsem_standardize()` / `dsem_r2()` — posterior `STDYX`, `STDY`, `STD` (cluster-averaged and per-cluster via `cluster = TRUE`), and Within/Between Bayesian $R^2$
   - `dsem_partial_cor()` — posterior partial and zero-order correlation networks across Between, Level-2/3, Occasion, and Within covariance blocks

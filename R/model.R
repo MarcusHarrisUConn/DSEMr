@@ -1,13 +1,15 @@
 #' Compile a dynamic structural equation model
 #'
 #' Compiles either the `DSEMr` extension of `lavaan` syntax or standard
-#' section-based SEM/Mplus-compatible model scripts into a canonical `DSEMmodel`
+#' section-based SEM model scripts into a canonical `DSEMmodel`
 #' intermediate representation. Supports single-level (`N=1`), two-level
-#' (`TWOLEVEL RANDOM`), three-level (`THREELEVEL RANDOM` / DSEM3), and
-#' cross-classified (`CROSSCLASSIFIED RANDOM`) dynamic structural equation
-#' models, including latent variable centering, random slopes, random log
-#' innovation variances, residual dynamics (RDSEM), dynamic factor models
-#' (DAFS and WNFS), binary/ordinal probit links, Tobit censored outcomes, and
+#' (`TWOLEVEL RANDOM`), three-level (`THREELEVEL RANDOM` / DSEM3),
+#' cross-classified (`CROSSCLASSIFIED RANDOM`), and continuous-time
+#' (`continuous_time = TRUE`) dynamic structural equation models, including
+#' latent variable centering, random slopes, random log innovation variances,
+#' random residual covariances, residual dynamics (RDSEM), ARMA(1,1), dynamic
+#' factor models (DAFS, WNFS, cross-classified CFA, and random factor
+#' loadings), binary/ordinal probit links, Tobit censored outcomes, and
 #' penalized shrinkage priors (PSEM).
 #'
 #' @param model Character string containing a model specification.
@@ -34,6 +36,9 @@
 #' @param centering Within-cluster centering policy for covariates and outcomes:
 #'   `"latent"` (default latent variable decomposition across 2 or 3 levels),
 #'   `"groupmean"`, `"grandmean"`, or `"none"`.
+#' @param continuous_time Logical; if `TRUE`, compiles the model as a
+#'   continuous-time Ornstein-Uhlenbeck dynamic model (`CT-DSEM` / `CT-RDSEM`)
+#'   using exact matrix-exponential transitions over irregular time intervals.
 #' @param metadata Optional named list retained with the compiled model.
 #' @return A `DSEMmodel` object.
 #' @examples
@@ -63,6 +68,7 @@ dsem_model <- function(model,
                        censored = NULL,
                        tinterval = NULL,
                        centering = c("latent", "groupmean", "grandmean", "none"),
+                       continuous_time = FALSE,
                        metadata = list()) {
   if (!is.function(lavaan::lavaanify)) {
     .dsem_abort("The installed lavaan package does not expose its public compiler API.")
@@ -148,6 +154,11 @@ dsem_model <- function(model,
   parsed$tinterval <- tinterval
   parsed$centering <- centering
   parsed$centered_vars <- parsed$mplus_centered_vars
+  parsed$continuous_time <- isTRUE(continuous_time) ||
+    (!is.null(parsed$mplus_algorithm) && grepl("^MH\\s*\\(\\s*(UNIMH|MH[2-5])\\s*\\)$", parsed$mplus_algorithm))
+  parsed$define_ops <- if (!is.null(parsed$mplus_define_ops)) parsed$mplus_define_ops else list()
+  parsed$constraints <- if (!is.null(parsed$mplus_constraints)) parsed$mplus_constraints else character()
+  parsed$wald_tests <- if (!is.null(parsed$mplus_tests)) parsed$mplus_tests else character()
   parsed$syntax <- syntax
   parsed$source <- model
   parsed$metadata <- metadata
@@ -275,7 +286,7 @@ dsem_model <- function(model,
         }
       }
 
-      if (op == "=~" && part_idx == 1L && !explicit_free && is.na(fixed_val)) {
+      if (op == "=~" && part_idx == 1L && !explicit_free && is.na(fixed_val) && !nzchar(random_prefix)) {
         fixed_val <- 1.0
         is_free <- FALSE
       }
@@ -327,7 +338,8 @@ dsem_model <- function(model,
     residual_dynamic = any(terms$residual),
     cross_classified = identical(lvl, "crossclassified") || any(terms$level == "time"),
     categorical = !identical(model$family, "gaussian") || length(model$categorical) > 0L,
-    censored = length(model$censored) > 0L
+    censored = length(model$censored) > 0L,
+    continuous_time = isTRUE(model$continuous_time)
   )
 }
 
@@ -338,6 +350,7 @@ dsem_model <- function(model,
     level_type = model$level_type, categorical = model$categorical,
     censored = model$censored
   )
+  if (isTRUE(model$continuous_time)) semantics$continuous_time <- TRUE
   paste0("dsem-", .dsem_stable_seed(1729L, paste(utils::capture.output(dput(semantics)), collapse = "")))
 }
 
@@ -349,7 +362,7 @@ print.DSEMmodel <- function(x, ...) {
   invisible(x)
 }
 
-#' Translate section-based SEM/Mplus script syntax to a DSEMr model
+#' Translate section-based SEM script syntax to a DSEMr model
 #'
 #' @param model Character string containing section-based SEM model syntax
 #'   (supporting single-level, two-level, three-level, and cross-classified

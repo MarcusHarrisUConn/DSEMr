@@ -22,9 +22,21 @@
   kx <- nrow(exog_specs)
   n_sl <- n_lags * d + kx
 
-  # Slot layout in Rust threelevel kernel: [d intercepts, d*n_sl slopes, d logv]
-  slot_names <- character(d + d * n_sl + d)
+  shared_cov <- .dsem_detect_shared_cov_factor(model)
+  shared_cov_loadings <- if (!is.null(shared_cov)) {
+    as.double(shared_cov$loadings[outcomes])
+  } else {
+    numeric(0L)
+  }
+  has_logvf <- length(shared_cov_loadings) > 0L
+
+  # Slot layout in Rust threelevel kernel: [d intercepts, d*n_sl slopes, d logv, optional logvf]
+  q_tot <- d + d * n_sl + d + as.integer(has_logvf)
+  slot_names <- character(q_tot)
+  slot_default_names <- character(q_tot)
+  slot_is_rand <- logical(q_tot)
   slot_names[seq_len(d)] <- outcomes
+  slot_default_names[seq_len(d)] <- outcomes
   for (j in seq_len(d)) {
     for (s_i in seq_len(n_sl)) {
       pos <- d + (j - 1L) * n_sl + s_i
@@ -42,41 +54,59 @@
       }
       lbl <- if (length(hit)) w_regs$label[hit[1L]] else ""
       slot_names[pos] <- if (nzchar(lbl)) lbl else def_nm
+      slot_default_names[pos] <- def_nm
+      slot_is_rand[pos] <- length(hit) > 0L && any(w_regs$random[hit])
     }
     hit_lv <- which(w_vars$lhs == outcomes[j] & w_vars$random)
     lbl_lv <- if (length(hit_lv)) w_vars$label[hit_lv[1L]] else ""
     slot_names[d + d * n_sl + j] <- if (nzchar(lbl_lv)) lbl_lv else paste0("logv_", outcomes[j])
+    slot_default_names[d + d * n_sl + j] <- paste0("logv_", outcomes[j])
+    slot_is_rand[d + d * n_sl + j] <- length(hit_lv) > 0L
   }
-  q_tot <- length(slot_names)
+  if (has_logvf) {
+    slot_names[q_tot] <- shared_cov$logvf_label
+    slot_default_names[q_tot] <- shared_cov$logvf_label
+    slot_is_rand[q_tot] <- TRUE
+  }
 
   # Determine which parameters vary at L2 and L3 (Asparouhov & Muthen, 2026b):
-  # intercepts vary at both L2 and L3 by default; random slopes/logv vary at L3 by default,
+  # intercepts vary at both L2 and L3 by default; random slopes/logv/logvf vary at L3 by default,
   # and at L2 if declared in between_2 (and not fixed to 0).
   b2_mentioned <- unique(c(t$lhs[t$level == "between_2"], t$rhs[t$level == "between_2" & t$op == "~~"]))
   b3_mentioned <- unique(c(t$lhs[t$level == "between_3"], t$rhs[t$level == "between_3" & t$op == "~~"]))
+  b2_fixed_zero <- character()
+  b3_fixed_zero <- character()
+  if (!is.null(meta) && nrow(meta) == nrow(t)) {
+    fz2 <- which(t$level == "between_2" & t$op == "~~" & t$lhs == t$rhs & !meta$is_free & !is.na(meta$fixed_value) & abs(meta$fixed_value) < 1e-12)
+    b2_fixed_zero <- unique(t$lhs[fz2])
+    fz3 <- which(t$level == "between_3" & t$op == "~~" & t$lhs == t$rhs & !meta$is_free & !is.na(meta$fixed_value) & abs(meta$fixed_value) < 1e-12)
+    b3_fixed_zero <- unique(t$lhs[fz3])
+  }
   has_l2_re <- integer(q_tot)
   has_l3_re <- integer(q_tot)
   for (j in seq_len(d)) {
-    has_l2_re[j] <- 1L
-    has_l3_re[j] <- 1L
+    if (!outcomes[j] %in% b2_fixed_zero) has_l2_re[j] <- 1L
+    if (!outcomes[j] %in% b3_fixed_zero) has_l3_re[j] <- 1L
   }
-  for (s_pos in (d + 1L):(d + d * n_sl)) {
-    snm <- slot_names[s_pos]
-    is_rand <- any(w_regs$random & (w_regs$label == snm | !nzchar(w_regs$label)))
-    if (snm %in% b2_mentioned) has_l2_re[s_pos] <- 1L
-    if (is_rand || snm %in% b3_mentioned) has_l3_re[s_pos] <- 1L
-  }
-  for (j in seq_len(d)) {
-    lv_pos <- d + d * n_sl + j
-    lv_nm <- slot_names[lv_pos]
-    if (lv_nm %in% b2_mentioned) has_l2_re[lv_pos] <- 1L
-    if (any(w_vars$lhs == outcomes[j] & w_vars$random) || lv_nm %in% b3_mentioned) {
-      has_l3_re[lv_pos] <- 1L
+  for (s_pos in (d + 1L):q_tot) {
+    cands <- unique(c(slot_names[s_pos], slot_default_names[s_pos]))
+    if (any(cands %in% b2_mentioned) && !any(cands %in% b2_fixed_zero)) has_l2_re[s_pos] <- 1L
+    if ((slot_is_rand[s_pos] || any(cands %in% b3_mentioned)) && !any(cands %in% b3_fixed_zero)) {
+      has_l3_re[s_pos] <- 1L
     }
   }
 
-  exog_w2 <- setdiff(unique(b2_regs$rhs), slot_names)
-  exog_w3 <- setdiff(unique(b3_regs$rhs), slot_names)
+  # Detect non-random Level-2 AR(1) terms: e.g. `%BETWEEN day% y ON y&1;` or `level: 2\n y ~ lag(y, 1)`
+  l2_ar_mask <- integer(d)
+  for (j in seq_len(d)) {
+    if (has_l2_re[j] == 1L &&
+        any(b2_regs$lhs == outcomes[j] & b2_regs$rhs == outcomes[j] & b2_regs$lag > 0L)) {
+      l2_ar_mask[j] <- 1L
+    }
+  }
+  b2_exog_regs <- b2_regs[!(b2_regs$lag > 0L & b2_regs$rhs %in% outcomes), , drop = FALSE]
+  exog_w2 <- setdiff(unique(b2_exog_regs$rhs), c(slot_names, slot_default_names))
+  exog_w3 <- setdiff(unique(b3_regs$rhs), c(slot_names, slot_default_names))
   kw2 <- length(exog_w2); kw3 <- length(exog_w3)
 
   .dsem_validate_data(data, c(l2_col, l3_col), model$time,
@@ -85,9 +115,16 @@
   l3_ids <- unique(data[[l3_col]])
   if (length(l3_ids) < 2L) .dsem_abort("Three-level DSEM requires at least two Level-3 clusters.")
 
-  # Build contiguous L2 units nested within L3 clusters
+  # Build contiguous L2 units nested within L3 clusters (sorted chronologically by L2 id when L2 AR is active)
   l2_keys <- paste(data[[l3_col]], data[[l2_col]], sep = "\r")
   u_l2_keys <- unique(l2_keys)
+  if (any(l2_ar_mask == 1L)) {
+    first_idx <- match(u_l2_keys, l2_keys)
+    l3_ord_key <- match(data[[l3_col]][first_idx], l3_ids)
+    l2_raw_key <- data[[l2_col]][first_idx]
+    l2_ord_key <- if (is.numeric(l2_raw_key)) as.numeric(l2_raw_key) else as.character(l2_raw_key)
+    u_l2_keys <- u_l2_keys[order(l3_ord_key, l2_ord_key)]
+  }
   u_l2_labels <- vapply(u_l2_keys, function(k) sub("\r", ":", k, fixed = TRUE), character(1))
   if (length(u_l2_keys) <= length(l3_ids)) {
     .dsem_abort("Three-level DSEM requires multiple Level-2 units nested within Level-3 clusters.")
@@ -137,15 +174,52 @@
     rep(0L, kx)
   }
 
-  prior <- utils::modifyList(list(beta_sd = 100, prior_mode = "default"), control)
+  default_pm <- if (!is.null(model$mplus_prior_mode)) model$mplus_prior_mode else "default"
+  prior <- utils::modifyList(list(beta_sd = 100, prior_mode = default_pm), control)
   prior <- .dsem_validate_prior(prior, control, c("beta_sd", "prior_mode"))
   if (engine == "auto") engine <- if (.dsem_rust_available()) "rust" else "R"
 
-  l2_nms <- slot_names[has_l2_re == 1L]
-  l3_nms <- slot_names[has_l3_re == 1L]
+  l2_idx <- which(has_l2_re == 1L)
+  l3_idx <- which(has_l3_re == 1L)
+  l2_nms <- slot_names[l2_idx]
+  l3_nms <- slot_names[l3_idx]
+  re_l3_on_w3_mask <- matrix(0L, kw3, length(l3_nms))
+  for (p3 in seq_along(l3_nms)) {
+    cands <- unique(c(slot_names[l3_idx[p3]], slot_default_names[l3_idx[p3]]))
+    for (k in seq_len(kw3)) {
+      if (any(b3_regs$lhs %in% cands & b3_regs$rhs == exog_w3[k])) {
+        re_l3_on_w3_mask[k, p3] <- 1L
+      }
+    }
+  }
+  re_l2_on_w2_mask <- matrix(0L, kw2, length(l2_nms))
+  for (p2 in seq_along(l2_nms)) {
+    cands <- unique(c(slot_names[l2_idx[p2]], slot_default_names[l2_idx[p2]]))
+    for (k in seq_len(kw2)) {
+      if (any(b2_exog_regs$lhs %in% cands & b2_exog_regs$rhs == exog_w2[k])) {
+        re_l2_on_w2_mask[k, p2] <- 1L
+      }
+    }
+  }
+
   param_names <- paste0("fixed_", slot_names)
-  for (sn in l3_nms) for (w3n in exog_w3) param_names <- c(param_names, paste0("l3_", sn, "_on_", w3n))
-  for (sn in l2_nms) for (w2n in exog_w2) param_names <- c(param_names, paste0("l2_", sn, "_on_", w2n))
+  for (j in seq_len(d)) {
+    if (l2_ar_mask[j] == 1L) param_names <- c(param_names, paste0("l2_ar1_", outcomes[j]))
+  }
+  for (p3 in seq_along(l3_nms)) {
+    for (k in seq_len(kw3)) {
+      if (re_l3_on_w3_mask[k, p3] == 1L) {
+        param_names <- c(param_names, paste0("l3_", l3_nms[p3], "_on_", exog_w3[k]))
+      }
+    }
+  }
+  for (p2 in seq_along(l2_nms)) {
+    for (k in seq_len(kw2)) {
+      if (re_l2_on_w2_mask[k, p2] == 1L) {
+        param_names <- c(param_names, paste0("l2_", l2_nms[p2], "_on_", exog_w2[k]))
+      }
+    }
+  }
   if (length(l3_nms)) {
     for (c_i in seq_along(l3_nms)) for (r_i in c_i:length(l3_nms)) {
       param_names <- c(param_names, if (r_i == c_i) paste0("l3_var_", l3_nms[r_i]) else paste0("l3_cov_", l3_nms[r_i], "_", l3_nms[c_i]))
@@ -156,12 +230,28 @@
       param_names <- c(param_names, if (r_i == c_i) paste0("l2_var_", l2_nms[r_i]) else paste0("l2_cov_", l2_nms[r_i], "_", l2_nms[c_i]))
     }
   }
+  any_rand_logv <- any(has_l2_re[(d + d * n_sl + 1L):(d + d * n_sl + d)] == 1L |
+                         has_l3_re[(d + d * n_sl + 1L):(d + d * n_sl + d)] == 1L)
+  use_full_sigma_w <- d > 1L && !any_rand_logv && !has_logvf
+  if (use_full_sigma_w) {
+    for (c_i in seq_len(d)) {
+      if (c_i < d) {
+        for (r_i in (c_i + 1L):d) {
+          param_names <- c(param_names, paste0("within_cov_", outcomes[r_i], "_", outcomes[c_i]))
+        }
+      }
+    }
+  }
 
-  masks <- as.integer(c(has_l2_re, has_l3_re, lc_x))
+  masks <- as.integer(c(
+    has_l2_re, has_l3_re, lc_x, l2_ar_mask,
+    as.integer(re_l3_on_w3_mask), as.integer(re_l2_on_w2_mask)
+  ))
   payload <- list(
     y = y_mat, x = x_mat, l2_sizes = as.integer(l2_sizes), l3_of_l2 = as.integer(l3_of_l2),
     g3_cnt = length(l3_ids), w2 = w2_mat, w3 = w3_mat, lags = as.integer(lags),
-    masks = masks, d = d, kx = kx, kw2 = kw2, kw3 = kw3,
+    masks = masks, shared_cov_loadings = shared_cov_loadings,
+    d = d, kx = kx, kw2 = kw2, kw3 = kw3,
     q_l2 = length(l2_nms), q_l3 = length(l3_nms),
     res_dyn = any(t$residual), pm_int = .dsem_prior_mode_int(prior$prior_mode),
     beta_sd = prior$beta_sd, engine = engine,
@@ -237,7 +327,7 @@
     raw <- dsem_rust_threelevel(
       as.double(payload$y), as.double(payload$x), payload$l2_sizes, payload$l3_of_l2,
       as.double(payload$w2), as.double(payload$w3), payload$lags, payload$masks,
-      dims, as.double(payload$beta_sd)
+      dims, as.double(c(payload$beta_sd, payload$shared_cov_loadings))
     )
     dr <- matrix(raw$draws, nrow = n_keep, ncol = raw$param_count,
                  dimnames = list(NULL, payload$param_names))
@@ -405,19 +495,53 @@
     matrix(0, n_grid, 0L)
   }
 
-  prior <- utils::modifyList(list(beta_sd = 100, prior_mode = "default"), control)
+  default_pm <- if (!is.null(model$mplus_prior_mode)) model$mplus_prior_mode else "default"
+  prior <- utils::modifyList(list(beta_sd = 100, prior_mode = default_pm), control)
   prior <- .dsem_validate_prior(prior, control, c("beta_sd", "prior_mode"))
   if (engine == "auto") engine <- if (.dsem_rust_available()) "rust" else "R"
 
-  re_id_nms <- c(outcomes, sl_nms[slope_rand_id == 1L], logv_nms[has_random_logv == 1L])
-  re_time_nms <- c(outcomes, sl_nms[slope_rand_time == 1L])
-  fixed_sl_nms <- sl_nms[slope_rand_id == 0L]
+  re_id_nms <- c(outcomes, sl_labels[slope_rand_id == 1L], logv_nms[has_random_logv == 1L])
+  re_id_alts <- c(outcomes, sl_nms[slope_rand_id == 1L], logv_nms[has_random_logv == 1L])
+  re_time_nms <- c(outcomes, sl_labels[slope_rand_time == 1L])
+  re_time_alts <- c(outcomes, sl_nms[slope_rand_time == 1L])
+  fixed_sl_nms <- sl_labels[slope_rand_id == 0L]
   q_id <- length(re_id_nms)
   q_time <- length(re_time_nms)
 
+  re_id_on_w_mask <- matrix(0L, kw_id, q_id)
+  for (q in seq_len(q_id)) {
+    cands <- unique(c(re_id_nms[q], re_id_alts[q]))
+    for (k in seq_len(kw_id)) {
+      if (any(b_regs$lhs %in% cands & b_regs$rhs == exog_id[k])) {
+        re_id_on_w_mask[k, q] <- 1L
+      }
+    }
+  }
+  re_time_on_w_mask <- matrix(0L, kw_time, q_time)
+  for (q in seq_len(q_time)) {
+    cands <- unique(c(re_time_nms[q], re_time_alts[q]))
+    for (k in seq_len(kw_time)) {
+      if (any(t_regs$lhs %in% cands & t_regs$rhs == exog_time[k])) {
+        re_time_on_w_mask[k, q] <- 1L
+      }
+    }
+  }
+
   param_names <- paste0("mean_", re_id_nms)
-  for (rn in re_id_nms) for (wn in exog_id) param_names <- c(param_names, paste0(rn, "_on_", wn))
-  for (tn in re_time_nms) for (wtn in exog_time) param_names <- c(param_names, paste0("time_", tn, "_on_", wtn))
+  for (q in seq_len(q_id)) {
+    for (k in seq_len(kw_id)) {
+      if (re_id_on_w_mask[k, q] == 1L) {
+        param_names <- c(param_names, paste0(re_id_nms[q], "_on_", exog_id[k]))
+      }
+    }
+  }
+  for (q in seq_len(q_time)) {
+    for (k in seq_len(kw_time)) {
+      if (re_time_on_w_mask[k, q] == 1L) {
+        param_names <- c(param_names, paste0("time_", re_time_nms[q], "_on_", exog_time[k]))
+      }
+    }
+  }
   param_names <- c(param_names, fixed_sl_nms)
   for (c_i in seq_len(q_id)) for (r_i in c_i:q_id) {
     param_names <- c(param_names, if (r_i == c_i) paste0("id_var_", re_id_nms[r_i]) else paste0("id_cov_", re_id_nms[r_i], "_", re_id_nms[c_i]))
@@ -431,7 +555,10 @@
     }
   }
 
-  masks <- as.integer(c(slope_rand_id, slope_rand_time, has_random_logv))
+  masks <- as.integer(c(
+    slope_rand_id, slope_rand_time, has_random_logv,
+    as.integer(re_id_on_w_mask), as.integer(re_time_on_w_mask)
+  ))
   payload <- list(
     y_grid = y_grid, x_grid = x_grid, w_id = w_id, w_time = w_time,
     lags = as.integer(lags), masks = masks,

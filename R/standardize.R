@@ -331,7 +331,7 @@ dsem_standardize <- function(object, type = c("stdyx", "stdy", "std"), prob = 0.
       next
     }
 
-    # 3e. Multilevel Between-level means / intercepts -> mean / SD_B (Mplus STDYX)
+    # 3e. Multilevel Between-level means / intercepts -> mean / SD_B (STDYX)
     if (is_multilevel && grepl("^(mean_|fixed_|intercept_)", p_name)) {
       nm_var <- sub("^(mean_|fixed_|intercept_)", "", p_name)
       lvl_lbl <- if (grepl("^fixed_", p_name)) "Between_L3" else "Between"
@@ -561,7 +561,7 @@ dsem_r2 <- function(object, prob = 0.95) {
   out
 }
 
-# ---- Internal helpers for Mplus-exact standardization & R^2 ----
+# ---- Internal helpers for within/between standardization & Bayesian R^2 ----
 
 .dsem_obs_sd_map <- function(object) {
   obs_y <- object$observed

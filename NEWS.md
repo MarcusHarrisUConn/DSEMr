@@ -9,20 +9,47 @@ engine.
 
 - **Three-Level DSEM (`THREELEVEL` / `DSEM3`):** full three-level latent
   variable decomposition, flexible Level-2 and Level-3 random intercepts,
-  slopes, and log innovation variances, Level-2 and Level-3 predictors,
-  simultaneous two-level block Gibbs updates via exact $O(C_g)$ Schur
-  complement marginalization (Asparouhov & Muthén, 2026), SUR conditioning on
-  correlated random effects, and full exposure of both Level-2 and Level-3
-  random-effect posteriors.
-- **Two-Level Location-Scale & Multivariate VAR DSEM:** latent person-mean
-  centering for outcomes and exogenous covariates, arbitrary random slopes
-  (including lagged exogenous covariates and sparse fixed-zero lag
-  specifications), full unstructured within-level innovation covariance
-  $\Sigma_W$ for multivariate two-level VAR, random log residual variances
-  (`logv | y`) updated via strictly-concave Newton-Laplace Independence MH,
-  exact stationary initial-state MH updates for short time series
-  (Asparouhov, 2026), between-level structural regressions, unstructured
-  random-effect covariances, and joint distal outcome regressions.
+  slopes, log innovation variances, and three-level random residual covariances
+  (`logvf`), non-random Level-2 AR(1) dynamics (`l2_ar1_y`), short-$T$ RDSEM3,
+  selective Level-2 and Level-3 predictors, simultaneous two-level block Gibbs
+  updates via exact $O(C_g)$ Schur complement marginalization (Asparouhov &
+  Muthén, 2026), exact PX scale group moves, PSEM Bayesian Lasso priors, and
+  full exposure of both Level-2 and Level-3 random-effect posteriors.
+- **Continuous-Time DSEM (`dsem_ct()`):** single-level and two-level
+  Ornstein–Uhlenbeck stochastic differential equation estimation for arbitrary
+  irregular observation intervals via exact Padé `[6/6]` scaling-and-squaring
+  matrix exponentials $\exp(A \Delta t)$ and Kronecker continuous-time Lyapunov
+  stationary covariances, with continuous-time Impulse Response Functions in
+  `dsem_irf()`.
+- **Two-Level Location-Scale, Random Residual Covariance, & Ordinal DSEM:**
+  latent person-mean centering for outcomes and exogenous covariates, joint
+  intercept-slope block Gibbs updates, arbitrary random slopes (including lagged
+  exogenous covariates and sparse fixed-zero lag specifications), full
+  unstructured within-level innovation covariance $\Sigma_W$, random log
+  residual variances (`logv | y`) and shared-shock random residual covariances
+  (`logvf | y1 ~~ y2` / `f BY y1@1 y2@1; logvf | f;`) updated via strictly-concave
+  Newton-Laplace Independence MH and exact PX scale group moves, exact
+  stationary initial-state MH updates for short-$T$ AR(1) and RDSEM
+  (Asparouhov, 2026), two-level binary and ordinal ($K \ge 3$) probit
+  augmentation, between-level structural regressions, unstructured random-effect
+  covariances, and joint distal outcome regressions.
+- **Exact Collapsed ARMA(1,1) & Dynamic Measurement Models:** $O(T)$ Toeplitz
+  tridiagonal Cholesky collapsed ARMA(1,1) sampler with joint collapsed
+  $(s, \theta, \log \sigma_e^2)$ ridge moves and exact marginal DIC; 3-way
+  collapsed 1D Kalman marginal MH for single-indicator measurement-error and
+  N=1 dynamic factor models; Cross-Classified Dynamic CFA with measurement
+  invariance and subject-varying random factor loadings (`s1-s3 | f BY y1-y3`).
+- **Scripting Extensions & Strict Monte Carlo:** `DEFINE:` inline variable
+  transformations (`CLUSTER_MEAN()`, `STANDARDIZE`, arithmetic), automatic
+  `MODEL CONSTRAINT:` and `MODEL TEST:` post-estimation attachment on `DSEMfit`,
+  canonical `prior_mode = "diffuse"` specification, and `convergence = "strict"`
+  acceptance gating in `dsem_monte_carlo()`.
+- **Interactive Shiny Studio (`run_dsemr()`):** 5-tab guided `bslib` web
+  interface covering curated datasets & file upload, `TINTERVAL` diagnostics,
+  visual model builder with live SVG path diagrams and LaTeX equations,
+  MCMC diagnostics, APA HTML tables, partial correlations, hypothesis & Wald
+  tests, IRFs, cluster rankings, DIC comparison, and Quarto/R reproducibility
+  bundle downloads.
 - **Tobit Censored DSEM (Single-Level & Two-Level):** Bayesian Tobit data
   augmentation for left-, right-, and interval-censored outcomes (`censored =`
   or `CENSORED = y (b)` / `(a)` / `(ab)`) with exact future-lag conditional

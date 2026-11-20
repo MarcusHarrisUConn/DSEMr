@@ -2,9 +2,9 @@
 
 ## Evidence hierarchy
 
-1. Published mathematical equations and documented defaults.
-2. Official public Mplus guide inputs and outputs.
-3. Open supplementary examples and author-posted output files.
+1. Published mathematical equations and documented Bayesian defaults in the DSEM literature.
+2. Published methodological benchmark datasets and reference outputs (Chapters 6 & 9 DSEM series; Asparouhov, Hamaker, & Muthén, 2018; Asparouhov & Muthén, 2020, 2024, 2025, 2026).
+3. Open supplementary examples and simulation specifications.
 4. Independently simulated data with declared truths.
 5. Internal R reference implementation for optimized-kernel verification.
 
@@ -31,7 +31,7 @@ is used.
 ## Package gates
 
 - Unit, integration, property, malformed-input, interruption/restart, sampler,
-  parity, and regression tests.
+  benchmark, and regression tests.
 - Rust test, fmt, Clippy, dependency audit, sanitizer/Valgrind where applicable.
 - Offline installation from the source tarball on supported platforms.
 - R release, oldrel, and devel CI on Linux, macOS, and Windows.
@@ -64,5 +64,5 @@ rule is not evidence of correctness or sufficient precision for every study.
 - The stationary AR conditional is checked by numerical quadrature, and the
   innovation-variance conditional by joint-density ratios.
 - Latent fitted values are reconstructed from joint state/loading draws.
-- Unsupported Mplus data/model semantics, constraints, malformed controls,
+- Unsupported section-based SEM data/model semantics, malformed controls,
   nonnumeric data, and invalid time indices must fail explicitly.

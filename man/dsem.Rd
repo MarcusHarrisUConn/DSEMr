@@ -48,10 +48,11 @@ index so draws are invariant to worker count.}
 \code{"rust"}, or transparent \code{"R"} reference implementation.}
 
 \item{control}{Named list of prior and estimation controls. Accepts
-\code{prior_mode} (\code{"default"}, \code{"mplus"} for diffuse priors, or \code{"penalized"}
-for Bayesian Lasso PSEM shrinkage), \code{beta_mean}, \code{beta_sd}, \code{sigma_shape},
-\code{sigma_scale}, \code{omega_df}, \code{omega_scale}, \code{coefficient_mean},
-\code{coefficient_sd}, \code{variance_shape}, \code{variance_scale}, and \code{ar_bound}.}
+\code{prior_mode} (\code{"default"}, \code{"diffuse"} — with legacy alias \code{"mplus"} — or
+\code{"penalized"} for Bayesian Lasso PSEM shrinkage), \code{beta_mean}, \code{beta_sd},
+\code{sigma_shape}, \code{sigma_scale}, \code{omega_df}, \code{omega_scale},
+\code{coefficient_mean}, \code{coefficient_sd}, \code{variance_shape}, \code{variance_scale},
+and \code{ar_bound}.}
 }
 \value{
 A \code{DSEMfit} object with S3 methods \code{\link[=summary]{summary()}}, \code{\link[=coef]{coef()}}, \code{\link[=vcov]{vcov()}},

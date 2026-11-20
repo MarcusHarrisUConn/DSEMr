@@ -24,3 +24,4 @@
 ^src/Makevars\.win$
 
 ^LICENSE\.md$
+^app\.R$

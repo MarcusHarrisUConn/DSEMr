@@ -97,7 +97,7 @@ pub fn mcmc_var_n1(
 
     // Thresholds for ordinal outcomes (K >= 3): tau[col] has K-1 thresholds.
     // For binary (K=2), fix threshold tau_1 = -alpha_j (equivalently fix intercept free & threshold=0 on y*,
-    // Mplus reports threshold = -intercept!). For K >= 3, fix tau_1 = 0, free intercept, sample tau_2..tau_{K-1}.
+    // Standard probit threshold convention: tau_1 = -intercept. For K >= 3, fix tau_1 = 0, free intercept, sample tau_2..tau_{K-1}.
     let mut extra_thresholds: Vec<Vec<f64>> = (0..d)
         .map(|col| {
             let k = outcome_types[col];
@@ -163,7 +163,7 @@ pub fn mcmc_var_n1(
                     continue;
                 }
                 let cond_var = (1.0 / sigma_inv[idx(j, j, d)].max(1e-8)).clamp(1e-6, 100.0);
-                let cond_sd = if is_cat[j] { 1.0 } else { cond_var.sqrt() };
+                let cond_sd = cond_var.sqrt();
 
                 // Conditional mean of y_{t,j} from current-time equation (conditioning on y_{t,-j} if d > 1)
                 let mut mu_tj = predict_var_cell(
@@ -209,23 +209,41 @@ pub fn mcmc_var_n1(
                 // Combine current-time Gaussian likelihood with future lag appearances t + lag < n_time
                 let mut prec = 1.0 / (cond_sd * cond_sd);
                 let mut info = mu_tj * prec;
-                if !residual_dynamics && (is_miss || c_flag != 0) {
+                if !residual_dynamics && (is_miss || c_flag != 0 || is_cat[j]) {
+                    let mut a_vec = vec![0.0; d];
+                    let mut r_vec = vec![0.0; d];
                     for (l_idx, &lag_val) in lags.iter().enumerate() {
                         let t_fut = t + lag_val;
                         if t_fut >= max_lag && t_fut < n_time {
                             let reg_row = 1 + l_idx * d + j;
+                            let mut any_nz = false;
                             for m_out in 0..d {
                                 let phi_mj = beta_mat[idx(reg_row, m_out, p_reg)];
+                                a_vec[m_out] = phi_mj;
                                 if phi_mj.abs() > 1e-12 {
-                                    let sig_mm = sigma[idx(m_out, m_out, d)].max(1e-6);
+                                    any_nz = true;
+                                }
+                            }
+                            if any_nz {
+                                for m_out in 0..d {
                                     let mu_fut = predict_var_cell(
                                         &y_work, x_in, &beta_mat, n_time, d, kx, lags, max_lag,
                                         p_reg, false, t_fut, m_out,
                                     );
-                                    let r_without = y_work[idx(t_fut, m_out, n_time)]
-                                        - (mu_fut - phi_mj * y_work[cell]);
-                                    prec += (phi_mj * phi_mj) / sig_mm;
-                                    info += phi_mj * r_without / sig_mm;
+                                    r_vec[m_out] = y_work[idx(t_fut, m_out, n_time)]
+                                        - (mu_fut - a_vec[m_out] * y_work[cell]);
+                                }
+                                for m1 in 0..d {
+                                    if a_vec[m1].abs() <= 1e-12 {
+                                        continue;
+                                    }
+                                    for m2 in 0..d {
+                                        let w12 = sigma_inv[idx(m1, m2, d)];
+                                        if w12.abs() > 1e-14 {
+                                            prec += a_vec[m1] * w12 * a_vec[m2];
+                                            info += a_vec[m1] * w12 * r_vec[m2];
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -258,7 +276,7 @@ pub fn mcmc_var_n1(
                         };
                         (lower, upper)
                     };
-                    y_work[cell] = rng.rtruncnorm(mu_tj, 1.0, lo, hi);
+                    y_work[cell] = rng.rtruncnorm(post_mean, post_sd, lo, hi);
                 } else if c_flag != 0 {
                     let (lo, hi) = if c_flag < 0 {
                         (f64::NEG_INFINITY, censor_lo.get(j).copied().unwrap_or(0.0))
@@ -353,7 +371,7 @@ pub fn mcmc_var_n1(
                 }
                 for p_i in 0..p_reg {
                     let prior_prec = match prior_mode {
-                        1 => 1e-10, // Mplus improper flat N(0, inf) stabilized at 1e-10
+                        1 => 1e-10, // Diffuse flat N(0, inf) stabilized at 1e-10
                         2 => {
                             if p_i == 0 {
                                 1.0 / (beta_sd * beta_sd)
@@ -549,7 +567,7 @@ pub fn mcmc_var_n1(
             } else {
                 let rss: f64 = e_mat.iter().map(|v| v * v).sum();
                 let (sh, sc) = if prior_mode == 1 {
-                    // Mplus IG(-1, 0): posterior shape = n_eff/2 - 1, scale = rss/2
+                    // Diffuse IG(-1, 0): posterior shape = n_eff/2 - 1, scale = rss/2
                     ((0.5 * n_eff as f64 - 1.0).max(0.5), 0.5 * rss.max(1e-8))
                 } else {
                     (sigma_shape + 0.5 * n_eff as f64, sigma_scale + 0.5 * rss)
@@ -594,7 +612,7 @@ pub fn mcmc_var_n1(
             for j in 0..d {
                 for p_i in 0..p_reg {
                     let val = if p_i == 0 && is_cat[j] {
-                        // Report Mplus threshold tau_1 = -intercept!
+                        // Report standard probit threshold tau_1 = -intercept
                         -beta_mat[idx(0, j, p_reg)]
                     } else {
                         beta_mat[idx(p_i, j, p_reg)]

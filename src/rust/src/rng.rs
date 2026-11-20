@@ -88,6 +88,24 @@ impl Rng {
         (b / g).clamp(1e-10, 1e8)
     }
 
+    /// Exact Michael-Schucany-Haas inverse-Gaussian sampler IG(mu, lambda)
+    /// for Bayesian Lasso / PSEM scale-mixture updates.
+    pub fn rinv_gaussian(&mut self, mu: f64, lambda: f64) -> f64 {
+        let m = mu.clamp(1e-8, 1e8);
+        let lam = lambda.clamp(1e-8, 1e8);
+        let z = self.rnorm();
+        let y = z * z;
+        let my = m * y;
+        let disc = (4.0 * m * lam * y + my * my).max(0.0).sqrt();
+        let x = m + (m * my - m * disc) / (2.0 * lam);
+        let u = self.runif();
+        if u <= m / (m + x) {
+            x.clamp(1e-10, 1e8)
+        } else {
+            (m * m / x.max(1e-12)).clamp(1e-10, 1e8)
+        }
+    }
+
     pub fn rtruncnorm(&mut self, mean: f64, sd: f64, lower: f64, upper: f64) -> f64 {
         let s = sd.max(1e-8);
         let a = if lower.is_finite() {

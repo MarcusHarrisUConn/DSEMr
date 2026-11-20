@@ -1,4 +1,7 @@
+mod arma;
+mod cc_dynamic_cfa;
 mod crossclassified;
+mod ct_dsem;
 mod dynamic_sem;
 mod kalman;
 mod linalg;
@@ -199,19 +202,6 @@ fn dsem_rust_twolevel(
         &masks[(head_len + n_slope_entries + d)..(head_len + n_slope_entries + d + kx)];
     let outcome_types = &masks[(head_len + n_slope_entries + d + kx)..];
 
-    let n_rs = slope_is_random.iter().filter(|&&v| v != 0).count();
-    let n_lv = (0..d)
-        .filter(|&j| has_random_logv[j] != 0 && outcome_types[j] < 2)
-        .count();
-    let q_re = d + n_rs + n_lv;
-    let expected_head = q_re * kz + kw * kz + kw * q_re;
-    if head_len != expected_head {
-        return Err(Error::Other("between mask dimensions mismatch".into()));
-    }
-    let z_on_re_mask = &masks[0..(q_re * kz)];
-    let z_on_w_mask = &masks[(q_re * kz)..(q_re * kz + kw * kz)];
-    let re_on_w_mask = &masks[(q_re * kz + kw * kz)..head_len];
-
     let (censor_lo, censor_hi) = if hyper.len() >= 3 + 2 * d {
         (
             hyper[3..(3 + d)].to_vec(),
@@ -220,6 +210,27 @@ fn dsem_rust_twolevel(
     } else {
         (vec![f64::NEG_INFINITY; d], vec![f64::INFINITY; d])
     };
+    let shared_cov_loadings: Vec<f64> = if hyper.len() >= 3 + 3 * d {
+        hyper[(3 + 2 * d)..(3 + 3 * d)].to_vec()
+    } else {
+        Vec::new()
+    };
+    let has_random_logvf = d > 1
+        && shared_cov_loadings.len() >= d
+        && shared_cov_loadings.iter().take(d).any(|&v| v.abs() > 1e-12);
+
+    let n_rs = slope_is_random.iter().filter(|&&v| v != 0).count();
+    let n_lv = (0..d)
+        .filter(|&j| has_random_logv[j] != 0 && outcome_types[j] < 2)
+        .count();
+    let q_re = d + n_rs + n_lv + usize::from(has_random_logvf);
+    let expected_head = q_re * kz + kw * kz + kw * q_re;
+    if head_len != expected_head {
+        return Err(Error::Other("between mask dimensions mismatch".into()));
+    }
+    let z_on_re_mask = &masks[0..(q_re * kz)];
+    let z_on_w_mask = &masks[(q_re * kz)..(q_re * kz + kw * kz)];
+    let re_on_w_mask = &masks[(q_re * kz + kw * kz)..head_len];
 
     let sizes_u: Vec<usize> = cluster_sizes.into_iter().map(|s| s as usize).collect();
     let out = twolevel::mcmc_twolevel(
@@ -244,6 +255,7 @@ fn dsem_rust_twolevel(
         outcome_types,
         &censor_lo,
         &censor_hi,
+        &shared_cov_loadings,
         dims[6],
         hyper[0],
         hyper[1],
@@ -264,9 +276,12 @@ fn dsem_rust_twolevel(
     ))
 }
 
-/// Native Rust MCMC kernel for Three-Level DSEM (DSEM3, simultaneous two-level block Gibbs).
+/// Native Rust MCMC kernel for Three-Level DSEM (DSEM3, simultaneous two-level block Gibbs,
+/// non-random Level-2 AR, random residual covariance, short-T stationary MH, and PSEM shrinkage).
 /// dims = [g3_cnt, d, kx, kw2, kw3, residual_dynamics, prior_mode, iter, warmup, thin, seed]
-/// masks = [has_l2_re (q_tot), has_l3_re (q_tot), latent_center_x (kx)]
+/// hyper = [beta_sd, optional shared_cov_loadings[0..d]]
+/// masks = [has_l2_re (q_tot), has_l3_re (q_tot), latent_center_x (kx),
+///          optional l2_ar_mask (d), optional re_l3_on_w3_mask (kw3*q_l3), optional re_l2_on_w2_mask (kw2*q_l2)]
 #[extendr]
 #[allow(clippy::too_many_arguments)]
 fn dsem_rust_threelevel(
@@ -279,21 +294,53 @@ fn dsem_rust_threelevel(
     lags: Vec<i32>,
     masks: Vec<i32>,
     dims: Vec<i32>,
-    beta_sd: f64,
+    hyper: Vec<f64>,
 ) -> std::result::Result<List, Error> {
-    if dims.len() < 11 {
-        return Err(Error::Other("invalid threelevel dims length".into()));
+    if dims.len() < 11 || hyper.is_empty() {
+        return Err(Error::Other("invalid threelevel dims or hyper length".into()));
     }
     let g3_cnt = dims[0] as usize;
     let d = dims[1] as usize;
     let kx = dims[2] as usize;
     let kw2 = dims[3] as usize;
     let kw3 = dims[4] as usize;
+    let beta_sd = hyper[0];
+    let shared_cov_loadings: Vec<f64> = if hyper.len() > d {
+        hyper[1..(1 + d)].to_vec()
+    } else {
+        Vec::new()
+    };
+    let has_random_logvf = d > 1
+        && shared_cov_loadings.len() >= d
+        && shared_cov_loadings.iter().take(d).any(|&v| v.abs() > 1e-12);
     let lags_u: Vec<usize> = lags.into_iter().map(|v| v.max(1) as usize).collect();
-    let q_tot = d + d * (lags_u.len() * d + kx) + d;
-    if masks.len() != 2 * q_tot + kx {
+    let q_tot = d + d * (lags_u.len() * d + kx) + d + usize::from(has_random_logvf);
+    let base_len = 2 * q_tot + kx;
+    if masks.len() < base_len {
         return Err(Error::Other("invalid threelevel masks length".into()));
     }
+    let has_l2_re = &masks[0..q_tot];
+    let has_l3_re = &masks[q_tot..(2 * q_tot)];
+    let latent_center_x = &masks[(2 * q_tot)..base_len];
+    let q_l2 = has_l2_re.iter().filter(|&&v| v != 0).count();
+    let q_l3 = has_l3_re.iter().filter(|&&v| v != 0).count();
+    let extra = &masks[base_len..];
+    let l2_ar_mask: Vec<i32> = if extra.len() >= d {
+        extra[0..d].to_vec()
+    } else {
+        vec![0; d]
+    };
+    let re_l3_on_w3_mask: Vec<i32> = if extra.len() >= d + kw3 * q_l3 {
+        extra[d..(d + kw3 * q_l3)].to_vec()
+    } else {
+        vec![1; kw3 * q_l3]
+    };
+    let re_l2_on_w2_mask: Vec<i32> = if extra.len() >= d + kw3 * q_l3 + kw2 * q_l2 {
+        extra[(d + kw3 * q_l3)..(d + kw3 * q_l3 + kw2 * q_l2)].to_vec()
+    } else {
+        vec![1; kw2 * q_l2]
+    };
+
     let sizes_u: Vec<usize> = l2_sizes.into_iter().map(|v| v as usize).collect();
     let l3_u: Vec<usize> = l3_of_l2.into_iter().map(|v| v as usize).collect();
     let out = threelevel::mcmc_threelevel(
@@ -309,9 +356,13 @@ fn dsem_rust_threelevel(
         kw2,
         kw3,
         &lags_u,
-        &masks[0..q_tot],
-        &masks[q_tot..(2 * q_tot)],
-        &masks[(2 * q_tot)..],
+        has_l2_re,
+        has_l3_re,
+        latent_center_x,
+        &l2_ar_mask,
+        &re_l3_on_w3_mask,
+        &re_l2_on_w2_mask,
+        &shared_cov_loadings,
         dims[5] != 0,
         dims[6],
         beta_sd,
@@ -333,7 +384,8 @@ fn dsem_rust_threelevel(
 
 /// Native Rust MCMC kernel for Cross-Classified DSEM with selective subject/time random slopes and predictors.
 /// dims = [n_id, n_time, d, kx, kw_id, kw_time, prior_mode, iter, warmup, thin, seed]
-/// masks = [slope_rand_id (d*n_sl), slope_rand_time (d*n_sl), has_random_logv (d)]
+/// masks = [slope_rand_id (d*n_sl), slope_rand_time (d*n_sl), has_random_logv (d),
+///          optional re_id_on_w_mask (kw_id*q_id), optional re_time_on_w_mask (kw_time*q_time)]
 #[extendr]
 #[allow(clippy::too_many_arguments)]
 fn dsem_rust_crossclassified(
@@ -351,25 +403,49 @@ fn dsem_rust_crossclassified(
     }
     let d = dims[2] as usize;
     let kx = dims[3] as usize;
+    let kw_id = dims[4] as usize;
+    let kw_time = dims[5] as usize;
     let lags_u: Vec<usize> = lags.into_iter().map(|v| v.max(1) as usize).collect();
     let n_sl_tot = d * (lags_u.len() * d + kx);
-    if masks.len() != 2 * n_sl_tot + d {
+    let base_len = 2 * n_sl_tot + d;
+    if masks.len() < base_len {
         return Err(Error::Other("invalid crossclassified masks length".into()));
     }
+    let sl_id = &masks[0..n_sl_tot];
+    let sl_tm = &masks[n_sl_tot..(2 * n_sl_tot)];
+    let lv_m = &masks[(2 * n_sl_tot)..base_len];
+    let q_id = d
+        + sl_id.iter().filter(|&&v| v != 0).count()
+        + lv_m.iter().filter(|&&v| v != 0).count();
+    let q_time = d + sl_tm.iter().filter(|&&v| v != 0).count();
+    let extra = &masks[base_len..];
+    let re_id_on_w_mask: Vec<i32> = if extra.len() >= kw_id * q_id {
+        extra[0..(kw_id * q_id)].to_vec()
+    } else {
+        vec![1; kw_id * q_id]
+    };
+    let re_time_on_w_mask: Vec<i32> = if extra.len() >= kw_id * q_id + kw_time * q_time {
+        extra[(kw_id * q_id)..(kw_id * q_id + kw_time * q_time)].to_vec()
+    } else {
+        vec![1; kw_time * q_time]
+    };
+
     let out = crossclassified::mcmc_crossclassified(
         &y_grid,
         &x_grid,
         &w_id,
         &w_time,
-        &masks[0..n_sl_tot],
-        &masks[n_sl_tot..(2 * n_sl_tot)],
-        &masks[(2 * n_sl_tot)..],
+        sl_id,
+        sl_tm,
+        lv_m,
+        &re_id_on_w_mask,
+        &re_time_on_w_mask,
         dims[0] as usize,
         dims[1] as usize,
         d,
         kx,
-        dims[4] as usize,
-        dims[5] as usize,
+        kw_id,
+        kw_time,
         &lags_u,
         dims[6],
         beta_sd,
@@ -385,6 +461,129 @@ fn dsem_rust_crossclassified(
         time_draws = out.time_draws,
         q_id = out.q_id as i32,
         q_time = out.q_time as i32,
+        fitted_mean = out.fitted_mean,
+        dic = out.dic,
+        pd = out.pd
+    ))
+}
+
+/// Native Rust collapsed MCMC kernel for N=1 and Two-Level ARMA(1,1) DSEM.
+/// dims = [random_ar, prior_mode, store_latent, iter, warmup, thin, seed]
+/// hyper = [theta_y_fixed, ar_bound]
+#[extendr]
+fn dsem_rust_arma11(
+    y: Vec<f64>,
+    cluster_sizes: Vec<i32>,
+    dims: Vec<i32>,
+    hyper: Vec<f64>,
+) -> std::result::Result<List, Error> {
+    if dims.len() < 7 || hyper.len() < 2 {
+        return Err(Error::Other("invalid arma11 dims/hyper length".into()));
+    }
+    let sizes_u: Vec<usize> = cluster_sizes.into_iter().map(|v| v as usize).collect();
+    let out = arma::mcmc_arma11(
+        &y,
+        &sizes_u,
+        dims[0] != 0,
+        hyper[0],
+        dims[1],
+        hyper[1],
+        dims[2] != 0,
+        dims[3] as usize,
+        dims[4] as usize,
+        dims[5] as usize,
+        dims[6] as u64,
+    );
+    Ok(list!(
+        draws = out.draws,
+        param_count = out.param_count as i32,
+        latent_draws = out.latent_draws,
+        re_draws = out.re_draws,
+        fitted_mean = out.fitted_mean,
+        dic = out.dic,
+        pd = out.pd
+    ))
+}
+
+/// Native Rust MCMC kernel for Cross-Classified / Two-Level Dynamic CFA with Measurement Invariance
+/// or Random Factor Loadings.
+/// dims = [n_id, n_time, n_items, random_loadings, has_f_subj, has_f_time, has_time_int,
+///         random_ar, psi_fixed_one, prior_mode, store_latent, iter, warmup, thin, seed]
+#[extendr]
+fn dsem_rust_cc_dynamic_cfa(
+    y_grid: Vec<f64>,
+    dims: Vec<i32>,
+    ar_bound: f64,
+) -> std::result::Result<List, Error> {
+    if dims.len() < 15 {
+        return Err(Error::Other("invalid cc_dynamic_cfa dims length".into()));
+    }
+    let out = cc_dynamic_cfa::mcmc_cc_dynamic_cfa(
+        &y_grid,
+        dims[0] as usize,
+        dims[1] as usize,
+        dims[2] as usize,
+        dims[3] != 0,
+        dims[4] != 0,
+        dims[5] != 0,
+        dims[6] != 0,
+        dims[7] != 0,
+        dims[8] != 0,
+        dims[9],
+        ar_bound,
+        dims[10] != 0,
+        dims[11] as usize,
+        dims[12] as usize,
+        dims[13] as usize,
+        dims[14] as u64,
+    );
+    Ok(list!(
+        draws = out.draws,
+        param_count = out.param_count as i32,
+        latent_draws = out.latent_draws,
+        id_draws = out.id_draws,
+        time_draws = out.time_draws,
+        fitted_mean = out.fitted_mean,
+        dic = out.dic,
+        pd = out.pd
+    ))
+}
+
+/// Native Rust MCMC kernel for Continuous-Time DSEM / CT-RDSEM (Ornstein-Uhlenbeck exact exp(A dt)).
+/// dims = [d, kx, random_drift, random_logv, prior_mode, iter, warmup, thin, seed]
+#[extendr]
+fn dsem_rust_ct_dsem(
+    y: Vec<f64>,
+    x: Vec<f64>,
+    time: Vec<f64>,
+    cluster_sizes: Vec<i32>,
+    dims: Vec<i32>,
+    beta_sd: f64,
+) -> std::result::Result<List, Error> {
+    if dims.len() < 9 {
+        return Err(Error::Other("invalid ct_dsem dims length".into()));
+    }
+    let sizes_u: Vec<usize> = cluster_sizes.into_iter().map(|v| v as usize).collect();
+    let out = ct_dsem::mcmc_ct_dsem(
+        &y,
+        &x,
+        &time,
+        &sizes_u,
+        dims[0] as usize,
+        dims[1] as usize,
+        dims[2] != 0,
+        dims[3] != 0,
+        dims[4],
+        beta_sd,
+        dims[5] as usize,
+        dims[6] as usize,
+        dims[7] as usize,
+        dims[8] as u64,
+    );
+    Ok(list!(
+        draws = out.draws,
+        param_count = out.param_count as i32,
+        re_draws = out.re_draws,
         fitted_mean = out.fitted_mean,
         dic = out.dic,
         pd = out.pd
@@ -610,6 +809,9 @@ extendr_module! {
     fn dsem_rust_threelevel;
     fn dsem_rust_crossclassified;
     fn dsem_rust_dynamic_sem;
+    fn dsem_rust_arma11;
+    fn dsem_rust_cc_dynamic_cfa;
+    fn dsem_rust_ct_dsem;
 }
 
 #[cfg(test)]
@@ -677,6 +879,7 @@ mod tests {
             &[0],
             &[f64::NEG_INFINITY],
             &[f64::INFINITY],
+            &[],
             0,
             10.0,
             2.0,
@@ -704,6 +907,10 @@ mod tests {
             &[1],
             &[1, 0, 0],
             &[1, 1, 1],
+            &[],
+            &[1],
+            &[],
+            &[],
             &[],
             false,
             0,
@@ -751,14 +958,15 @@ mod tests {
         assert_eq!(out_c.draws.len(), 100 * out_c.param_count);
         assert!(out_c.dic.is_finite());
 
-        // 2. Bivariate two-level VAR(1) with correlated within innovations Sigma_W
+        // 2. Bivariate two-level VAR(1) with random residual covariance (Ex 9.32b)
         let mut y2 = vec![0.0; 8 * 20 * 2];
         for g in 0..8 {
             let mut p1 = 0.0;
             let mut p2 = 0.0;
             for t in 0..20 {
-                let e1 = 0.6 * r.rnorm();
-                let e2 = 0.5 * e1 + 0.5 * r.rnorm();
+                let f_sh = 0.5 * r.rnorm();
+                let e1 = f_sh + 0.5 * r.rnorm();
+                let e2 = f_sh + 0.5 * r.rnorm();
                 let c1 = 0.4 * p1 + 0.2 * p2 + e1;
                 let c2 = 0.3 * p2 + 0.15 * p1 + e2;
                 let row = g * 20 + t;
@@ -783,14 +991,15 @@ mod tests {
             0,
             &[1],
             &[1, 1, 1, 1],
-            &[0, 0],
+            &[1, 1],
             true,
             &[],
             false,
             &[0, 0],
             &[f64::NEG_INFINITY; 2],
             &[f64::INFINITY; 2],
-            0,
+            &[1.0, 1.0],
+            2, // PSEM mode
             10.0,
             2.0,
             0.05,
@@ -799,10 +1008,19 @@ mod tests {
             1,
             88,
         );
+        assert_eq!(out_mv.q_re, 9);
         assert_eq!(out_mv.draws.len(), 80 * out_mv.param_count);
-        assert!(out_mv.dic.is_finite());
+        assert!(
+            out_mv.dic.is_finite(),
+            "dic={} pd={} first_row={:?}",
+            out_mv.dic,
+            out_mv.pd,
+            (0..out_mv.param_count.min(15))
+                .map(|j| out_mv.draws[j * 80])
+                .collect::<Vec<_>>()
+        );
 
-        // 3. Cross-classified with selective random covariate slope across subject & time + w_time
+        // 3. Cross-classified with selective random covariate slope & selective time predictor mask
         let n_id = 6;
         let n_t = 15;
         let mut yc = vec![0.0; n_id * n_t];
@@ -826,6 +1044,8 @@ mod tests {
             &[0, 1], // AR fixed, x slope random across subject
             &[0, 1], // AR fixed, x slope random across time
             &[0],
+            &[],
+            &[0, 1], // only sx on w_time (not y)
             n_id,
             n_t,
             1,
@@ -844,5 +1064,75 @@ mod tests {
         assert_eq!(out_cc.q_time, 2);
         assert_eq!(out_cc.draws.len(), 80 * out_cc.param_count);
         assert!(out_cc.dic.is_finite());
+    }
+
+    #[test]
+    fn arma11_cc_dynamic_cfa_and_ct_dsem_kernels_work() {
+        let mut r = rng::Rng::from_seed(31415);
+
+        // 1. Two-level ARMA(1,1)
+        let mut y_arma = Vec::new();
+        for g in 0..10 {
+            let mu = (g as f64 - 4.5) * 0.2;
+            let s = 0.35;
+            let mut e_prev = r.rnorm();
+            let mut y_prev = e_prev;
+            y_arma.push(mu + y_prev);
+            for _ in 1..40 {
+                let e_cur = r.rnorm();
+                let y_cur = s * y_prev + e_cur - 0.25 * e_prev + 0.1 * r.rnorm();
+                y_arma.push(mu + y_cur);
+                e_prev = e_cur;
+                y_prev = y_cur;
+            }
+        }
+        let out_a = arma::mcmc_arma11(&y_arma, &[40; 10], true, 0.01, 1, 0.98, false, 160, 80, 1, 11);
+        assert_eq!(out_a.param_count, 7);
+        assert_eq!(out_a.draws.len(), 80 * 7);
+        assert!(out_a.dic.is_finite());
+
+        // 2. Cross-classified Dynamic CFA with random factor loadings
+        let n_id = 8;
+        let n_t = 12;
+        let p = 3;
+        let mut y_cfa = vec![0.0; n_id * n_t * p];
+        for g in 0..n_id {
+            let mut eta = 0.0;
+            for t in 0..n_t {
+                eta = 0.4 * eta + r.rnorm();
+                for j in 0..p {
+                    let row = g * n_t + t;
+                    y_cfa[j * (n_id * n_t) + row] = (0.8 + 0.1 * j as f64) * eta + 0.5 * r.rnorm();
+                }
+            }
+        }
+        let out_cfa = cc_dynamic_cfa::mcmc_cc_dynamic_cfa(
+            &y_cfa, n_id, n_t, p, true, true, true, true, false, true, 0, 0.98, false, 120, 60, 1, 22,
+        );
+        assert_eq!(out_cfa.draws.len(), 60 * out_cfa.param_count);
+        assert!(out_cfa.dic.is_finite());
+
+        // 3. Continuous-Time Bivariate OU (N=1) with irregular time gaps
+        let n_ct = 120;
+        let mut t_ct = vec![0.0; n_ct];
+        let mut y_ct = vec![0.0; n_ct * 2];
+        let a_true = vec![-0.7, 0.15, 0.2, -0.5]; // col-major
+        let q_true = vec![0.8, 0.2, 0.2, 0.6];
+        let sig_inf = ct_dsem::solve_lyapunov_ct(&a_true, &q_true, 2).unwrap();
+        assert!(sig_inf[0] > 0.0 && sig_inf[3] > 0.0);
+        let mut prev = [0.0, 0.0];
+        for i in 1..n_ct {
+            let dt = 0.5 + 1.5 * r.runif();
+            t_ct[i] = t_ct[i - 1] + dt;
+            let phi = ct_dsem::mat_exp_scaled(&a_true, dt, 2);
+            let c0 = phi[0] * prev[0] + phi[2] * prev[1] + 0.5 * r.rnorm();
+            let c1 = phi[1] * prev[0] + phi[3] * prev[1] + 0.5 * r.rnorm();
+            y_ct[i] = c0;
+            y_ct[n_ct + i] = c1;
+            prev = [c0, c1];
+        }
+        let out_ct = ct_dsem::mcmc_ct_dsem(&y_ct, &[], &t_ct, &[n_ct], 2, 0, false, false, 0, 10.0, 140, 70, 1, 33);
+        assert_eq!(out_ct.draws.len(), 70 * out_ct.param_count);
+        assert!(out_ct.dic.is_finite());
     }
 }

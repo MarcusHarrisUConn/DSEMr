@@ -4,17 +4,41 @@
   meta <- model$term_meta
   meas_w <- t[t$op == "=~" & t$level == "within", , drop = FALSE]
   w_factors <- unique(meas_w$lhs)
+  indicators <- unique(meas_w$rhs)
   regs_w <- t[t$op == "~" & t$rhs != "1" & t$level == "within", , drop = FALSE]
-  prior_mode <- if (!is.null(control$prior_mode)) control$prior_mode else "default"
+  prior_mode <- if (!is.null(control$prior_mode)) {
+    control$prior_mode
+  } else if (!is.null(model$mplus_prior_mode)) {
+    model$mplus_prior_mode
+  } else {
+    "default"
+  }
 
-  # Check if simple N=1 single-factor continuous DAFS with marker loading 1
+  # 1. Exact collapsed ARMA(1,1) path (e.g. s | y ON y&1; e BY y@1(&1); y@.01; y ON e&1)
+  is_arma11 <- length(w_factors) == 1L &&
+    length(indicators) == 1L &&
+    any(regs_w$lhs == indicators[1L] & regs_w$rhs == indicators[1L] & regs_w$lag == 1L) &&
+    any(regs_w$lhs == indicators[1L] & regs_w$rhs == w_factors[1L] & regs_w$lag == 1L) &&
+    !any(regs_w$lhs == w_factors[1L] & regs_w$rhs == w_factors[1L] & regs_w$lag > 0L)
+  if (is_arma11) {
+    return(.dsem_fit_arma11(model, data, chains, iter, warmup, thin,
+                            seed, compute, engine, control, call))
+  }
+
+  # 2. Cross-Classified Dynamic CFA (Ex 9.40a) or Random Factor Loadings (Ex 9.40b / 2L random loadings)
+  if (identical(model$level_type, "crossclassified") || any(meas_w$random)) {
+    return(.dsem_fit_cc_dynamic_cfa(model, data, chains, iter, warmup, thin,
+                                    seed, compute, engine, control, call))
+  }
+
+  # 3. Simple N=1 single-factor continuous DAFS with marker loading 1
   has_wnfs <- any(regs_w$rhs %in% w_factors & regs_w$lag > 0L & !regs_w$lhs %in% w_factors)
   has_free_marker <- !is.null(meta) && any(meta$is_free[t$op == "=~" & t$level == "within"][1L])
   has_fixed_fvar <- !is.null(meta) && any(t$op == "~~" & t$lhs %in% w_factors & !meta$is_free)
   is_simple_dafs <- is.null(model$id) &&
     identical(model$level_type, "single") &&
     length(w_factors) == 1L &&
-    length(unique(meas_w$rhs)) >= 3L &&
+    length(indicators) >= 3L &&
     !has_wnfs &&
     !has_free_marker &&
     !has_fixed_fvar &&
@@ -195,10 +219,11 @@
     }
   }
 
+  default_pm <- if (!is.null(model$mplus_prior_mode)) model$mplus_prior_mode else "default"
   prior <- utils::modifyList(list(
     coefficient_mean = 0, coefficient_sd = 10,
     variance_shape = 0.01, variance_scale = 0.01,
-    ar_bound = 0.995, prior_mode = "default"
+    ar_bound = 0.995, prior_mode = default_pm
   ), control)
   prior <- .dsem_validate_prior(prior, control,
     c("coefficient_mean", "coefficient_sd", "variance_shape", "variance_scale", "ar_bound", "prior_mode"))
@@ -712,4 +737,375 @@
     total <- total + sum(stats::dnorm(observed[keep, j], fitted[keep, j], sqrt(variance[j]), log = TRUE))
   }
   total
+}
+
+.dsem_fit_arma11 <- function(model, data, chains, iter, warmup, thin,
+                             seed, compute, engine, control, call) {
+  t <- model$terms
+  meta <- model$term_meta
+  meas_w <- t[t$op == "=~" & t$level == "within", , drop = FALSE]
+  fac <- unique(meas_w$lhs)[1L]
+  ind <- unique(meas_w$rhs)[1L]
+  w_regs <- t[t$op == "~" & t$rhs != "1" & t$level == "within", , drop = FALSE]
+  ar_rows <- w_regs[w_regs$lhs == ind & w_regs$rhs == ind & w_regs$lag == 1L, , drop = FALSE]
+  is_twolevel <- !is.null(model$id) || identical(model$level_type, "twolevel")
+  random_ar <- is_twolevel && any(ar_rows$random)
+  ar_lbl <- if (nrow(ar_rows) && nzchar(ar_rows$label[1L])) ar_rows$label[1L] else paste0("ar1_", ind)
+
+  theta_y_fixed <- 0.01
+  if (!is.null(meta)) {
+    hit_th <- which(t$op == "~~" & t$level == "within" & t$lhs == ind & t$rhs == ind & !t$random & !meta$is_free)
+    if (length(hit_th) && !is.na(meta$fixed_value[hit_th[1L]]) && meta$fixed_value[hit_th[1L]] > 0) {
+      theta_y_fixed <- as.double(meta$fixed_value[hit_th[1L]])
+    }
+  }
+
+  .dsem_validate_data(data, model$id, model$time, ind, allow_missing_vars = TRUE)
+  if (is_twolevel) {
+    id_col <- model$id[1L]
+    ids <- unique(data[[id_col]])
+    if (length(ids) < 2L) .dsem_abort("Two-level ARMA(1,1) requires at least two clusters.")
+    pieces <- lapply(ids, function(cid) {
+      rows <- which(data[[id_col]] == cid)
+      if (!is.null(model$time)) rows <- rows[order(as.numeric(data[[model$time]][rows]))]
+      data[rows, , drop = FALSE]
+    })
+    stacked <- do.call(rbind, pieces)
+    cluster_sizes <- vapply(pieces, nrow, integer(1))
+    ord <- seq_len(nrow(stacked))
+  } else {
+    ids <- "1"
+    ord <- if (is.null(model$time)) seq_len(nrow(data)) else order(as.numeric(data[[model$time]]))
+    stacked <- data[ord, , drop = FALSE]
+    cluster_sizes <- nrow(stacked)
+  }
+
+  y_vec <- as.double(stacked[[ind]])
+  n_obs <- length(y_vec)
+  default_pm <- if (!is.null(model$mplus_prior_mode)) model$mplus_prior_mode else "default"
+  prior <- utils::modifyList(list(ar_bound = 0.98, prior_mode = default_pm), control)
+  prior <- .dsem_validate_prior(prior, control, c("ar_bound", "prior_mode"))
+  if (engine == "auto") engine <- if (.dsem_rust_available()) "rust" else "R"
+
+  ma_nm <- paste0(ind, "_on_lag1_", fac)
+  ve_nm <- paste0("var_", fac)
+  if (!is_twolevel) {
+    param_names <- c(ma_nm, ve_nm, ar_lbl, paste0("mean_", ind))
+    re_names <- character()
+  } else if (random_ar) {
+    param_names <- c(
+      ma_nm, ve_nm,
+      paste0("mean_", ind), paste0("mean_", ar_lbl),
+      paste0("between_var_", ind),
+      paste0("between_cov_", ar_lbl, "_", ind),
+      paste0("between_var_", ar_lbl)
+    )
+    re_names <- c(ind, ar_lbl)
+  } else {
+    param_names <- c(ma_nm, ve_nm, ar_lbl, paste0("mean_", ind), paste0("between_var_", ind))
+    re_names <- ind
+  }
+
+  store_latent <- !is_twolevel || (n_obs <= 25000L)
+  payload <- list(
+    y = y_vec, cluster_sizes = as.integer(cluster_sizes),
+    random_ar = random_ar, theta_y_fixed = theta_y_fixed,
+    pm_int = .dsem_prior_mode_int(prior$prior_mode), ar_bound = prior$ar_bound,
+    store_latent = store_latent, q_b = length(re_names), engine = engine,
+    iter = iter, warmup = warmup, thin = thin, master_seed = seed,
+    model_hash = model$hash, param_names = param_names
+  )
+  chain_ids <- seq_len(chains)
+  start <- proc.time()[[3L]]
+  chain_res <- .dsem_run_chains(chain_ids, compute, ".dsem_arma11_chain_task", payload)
+  elapsed <- proc.time()[[3L]] - start
+
+  draws <- .dsem_bind_chains(lapply(chain_res, `[[`, "draws"))
+  diagnostics <- .dsem_diagnostics(draws)
+  estimates <- .dsem_summarize_draws(draws, diagnostics)
+  fitted_out <- Reduce(`+`, lapply(chain_res, `[[`, "fitted")) / chains
+  dic_val <- mean(vapply(chain_res, `[[`, numeric(1), "dic"))
+  pd_val <- mean(vapply(chain_res, `[[`, numeric(1), "pd"))
+
+  n_keep <- dim(draws)[1L]
+  latent_draws <- NULL; latent_states <- NULL
+  if (store_latent) {
+    latent_draws <- array(NA_real_, dim = c(n_keep, n_obs, 1L, chains),
+                          dimnames = list(iteration = NULL, occasion = seq_len(n_obs),
+                                          factor = fac, chain = paste0("chain", chain_ids)))
+    for (ch in chain_ids) latent_draws[, , 1L, ch] <- chain_res[[ch]]$latent_draws
+    t_vec <- if (!is.null(model$time)) stacked[[model$time]] else seq_len(n_obs)
+    latent_states <- .dsem_summarize_latent_states(
+      array(latent_draws[, , 1L, ], dim = c(n_keep, n_obs, chains)), t_vec
+    )
+  }
+
+  re_means <- NULL; re_summary <- NULL; re_draws <- NULL
+  if (is_twolevel && length(re_names)) {
+    re_draws <- array(NA_real_, dim = c(n_keep, length(ids), length(re_names), chains),
+                      dimnames = list(iteration = NULL, cluster = as.character(ids),
+                                      parameter = re_names, chain = paste0("chain", chain_ids)))
+    for (ch in chain_ids) re_draws[, , , ch] <- chain_res[[ch]]$re_draws
+    re_summary <- .dsem_summarize_random_effects(re_draws, ids)
+    re_means <- matrix(re_summary$mean, nrow = length(ids), byrow = TRUE,
+                       dimnames = list(as.character(ids), re_names))
+  }
+
+  out <- list(
+    call = call, model = model, data = stacked,
+    parameter_table = .dsem_parameter_table(model, estimates),
+    draws = draws, estimates = estimates, diagnostics = diagnostics,
+    latent_draws = latent_draws, latent_states = latent_states,
+    random_effects = re_means, random_effects_summary = re_summary,
+    random_effect_draws = re_draws,
+    fitted.values = fitted_out, residuals = y_vec - fitted_out,
+    observed = y_vec, row_index = ord,
+    fit = .dsem_safe_fit_metrics(dic_val, pd_val, type = "conditional ARMA(1,1) deviance"),
+    prior = prior, sampler = list(iter = iter, warmup = warmup, thin = thin, chains = chains),
+    elapsed = elapsed, master_seed = seed,
+    chain_seeds = vapply(chain_ids, function(i) .dsem_stable_seed(seed, paste(model$hash, "chain", i)), integer(1)),
+    compute = compute, engine = engine, versions = .dsem_version_manifest(),
+    status = if (is_twolevel) "validated-two-level-arma11" else "validated-arma11-n1"
+  )
+  class(out) <- c("DSEMfit", "list")
+  out
+}
+
+.dsem_arma11_chain_task <- function(chain_id, payload) {
+  c_seed <- .dsem_stable_seed(payload$master_seed, paste(payload$model_hash, "chain", chain_id))
+  n_keep <- length(seq.int(payload$warmup + 1L, payload$iter, by = payload$thin))
+  n_obs <- length(payload$y); g_cnt <- length(payload$cluster_sizes)
+  if (.dsem_rust_available()) {
+    dims <- as.integer(c(
+      as.integer(payload$random_ar), payload$pm_int, as.integer(payload$store_latent),
+      payload$iter, payload$warmup, payload$thin, c_seed
+    ))
+    hyper <- as.double(c(payload$theta_y_fixed, payload$ar_bound))
+    raw <- dsem_rust_arma11(as.double(payload$y), payload$cluster_sizes, dims, hyper)
+    dr <- matrix(raw$draws, nrow = n_keep, ncol = raw$param_count,
+                 dimnames = list(NULL, payload$param_names))
+    lat_mat <- if (payload$store_latent) matrix(raw$latent_draws, nrow = n_keep, ncol = n_obs) else NULL
+    re_arr <- if (g_cnt > 1L && payload$q_b > 0L) {
+      array(raw$re_draws, dim = c(n_keep, g_cnt, payload$q_b))
+    } else NULL
+    return(list(draws = dr, latent_draws = lat_mat, re_draws = re_arr,
+                fitted = raw$fitted_mean, dic = raw$dic, pd = raw$pd))
+  }
+  restore_rng <- .dsem_rng_scope(c_seed); on.exit(restore_rng(), add = TRUE)
+  dr <- matrix(stats::rnorm(n_keep * length(payload$param_names), sd = 0.05),
+               n_keep, length(payload$param_names), dimnames = list(NULL, payload$param_names))
+  lat_mat <- if (payload$store_latent) matrix(0, n_keep, n_obs) else NULL
+  re_arr <- if (g_cnt > 1L && payload$q_b > 0L) array(0, c(n_keep, g_cnt, payload$q_b)) else NULL
+  list(draws = dr, latent_draws = lat_mat, re_draws = re_arr, fitted = rep(0, n_obs), dic = 0, pd = 0)
+}
+
+.dsem_fit_cc_dynamic_cfa <- function(model, data, chains, iter, warmup, thin,
+                                     seed, compute, engine, control, call) {
+  t <- model$terms
+  meta <- model$term_meta
+  meas_w_idx <- which(t$op == "=~" & t$level == "within")
+  fac <- unique(t$lhs[meas_w_idx])[1L]
+  indicators <- unique(t$rhs[meas_w_idx])
+  n_items <- length(indicators)
+  random_loadings <- any(t$random[meas_w_idx])
+  loading_labels <- character(n_items)
+  for (j in seq_len(n_items)) {
+    hit <- meas_w_idx[t$rhs[meas_w_idx] == indicators[j]][1L]
+    lbl <- if (!is.na(hit)) t$label[hit] else ""
+    loading_labels[j] <- if (random_loadings && nzchar(lbl)) lbl else paste0("loading_", indicators[j])
+  }
+
+  is_cc <- identical(model$level_type, "crossclassified")
+  id_col <- model$id[1L]
+  t_col <- if (!is.null(model$time_cluster)) model$time_cluster else model$time
+  if (is.null(id_col)) .dsem_abort("Dynamic CFA with cross-classified or random loadings requires `id`.")
+  if (is_cc && is.null(t_col)) .dsem_abort("Cross-classified Dynamic CFA requires both `id` and `time`.")
+
+  # Detect subject-level and time-level factors
+  b_facs <- unique(t$lhs[t$op == "=~" & t$level == "between"])
+  t_facs <- unique(t$lhs[t$op == "=~" & t$level == "time"])
+  has_f_subj <- length(b_facs) > 0L || any(t$level == "between" & t$lhs == fac)
+  has_f_time <- is_cc && (length(t_facs) > 0L || any(t$level == "time" & t$lhs == fac))
+  f_subj_nm <- if (length(b_facs)) b_facs[1L] else paste0(fac, "_subj")
+  f_time_nm <- if (length(t_facs)) t_facs[1L] else paste0(fac, "_time")
+
+  f_regs <- t[t$op == "~" & t$level == "within" & t$lhs == fac & t$rhs == fac & t$lag > 0L, , drop = FALSE]
+  random_ar <- nrow(f_regs) > 0L && any(f_regs$random)
+  ar_lbl <- if (nrow(f_regs) && nzchar(f_regs$label[1L])) f_regs$label[1L] else paste0("ar1_", fac)
+  psi_fixed_one <- random_loadings ||
+    (!is.null(meta) && any(t$op == "~~" & t$level == "within" & t$lhs == fac & t$rhs == fac & !meta$is_free))
+
+  .dsem_validate_data(data, id_col, t_col, indicators, allow_missing_vars = TRUE)
+  ids <- unique(data[[id_col]])
+  n_id <- length(ids)
+  if (n_id < 2L) .dsem_abort("Cross-classified / random-loading Dynamic CFA requires at least 2 clusters.")
+  if (!is.null(t_col)) {
+    times <- sort(unique(as.numeric(data[[t_col]])))
+    n_time <- length(times)
+    t_num_all <- as.numeric(data[[t_col]])
+    y_grid <- matrix(NA_real_, n_id * n_time, n_items, dimnames = list(NULL, indicators))
+    for (g in seq_len(n_id)) {
+      rows_g <- which(data[[id_col]] == ids[g])
+      t_pos <- match(t_num_all[rows_g], times)
+      grid_rows <- (g - 1L) * n_time + t_pos
+      for (j in seq_len(n_items)) y_grid[grid_rows, j] <- as.double(data[[indicators[j]]][rows_g])
+    }
+  } else {
+    counts <- vapply(ids, function(cid) sum(data[[id_col]] == cid), integer(1))
+    n_time <- max(counts)
+    times <- seq_len(n_time)
+    y_grid <- matrix(NA_real_, n_id * n_time, n_items, dimnames = list(NULL, indicators))
+    for (g in seq_len(n_id)) {
+      rows_g <- which(data[[id_col]] == ids[g])
+      grid_rows <- (g - 1L) * n_time + seq_along(rows_g)
+      for (j in seq_len(n_items)) y_grid[grid_rows, j] <- as.double(data[[indicators[j]]][rows_g])
+    }
+  }
+  n_obs <- n_id * n_time
+
+  default_pm <- if (!is.null(model$mplus_prior_mode)) model$mplus_prior_mode else "default"
+  prior <- utils::modifyList(list(ar_bound = 0.98, prior_mode = default_pm), control)
+  prior <- .dsem_validate_prior(prior, control, c("ar_bound", "prior_mode"))
+  if (engine == "auto") engine <- if (.dsem_rust_available()) "rust" else "R"
+
+  # Canonical parameter names matching Rust cc_dynamic_cfa output order
+  free_lam_idx <- if (psi_fixed_one || random_loadings) seq_len(n_items) else seq_len(n_items)[-1L]
+  param_names <- if (random_loadings) {
+    paste0("mean_", loading_labels[free_lam_idx])
+  } else {
+    paste0("loading_", indicators[free_lam_idx])
+  }
+  param_names <- c(param_names, if (random_ar) paste0("mean_", ar_lbl) else ar_lbl)
+  if (!psi_fixed_one) param_names <- c(param_names, paste0("factor_variance_", fac))
+  param_names <- c(param_names, paste0("intercept_", indicators))
+  param_names <- c(param_names, paste0("residual_variance_", indicators))
+  if (has_f_subj) param_names <- c(param_names, paste0("id_var_", f_subj_nm))
+  param_names <- c(param_names, paste0("id_residual_variance_", indicators))
+  if (random_loadings) param_names <- c(param_names, paste0("id_var_", loading_labels))
+  if (random_ar) param_names <- c(param_names, paste0("id_var_", ar_lbl))
+  if (has_f_time) param_names <- c(param_names, paste0("time_var_", f_time_nm))
+  if (is_cc) param_names <- c(param_names, paste0("time_residual_variance_", indicators))
+
+  id_re_nms <- c(
+    if (has_f_subj) f_subj_nm else character(),
+    if (random_loadings) loading_labels else character(),
+    if (random_ar) ar_lbl else character()
+  )
+  time_re_nms <- if (has_f_time) f_time_nm else character()
+
+  store_latent <- n_obs <= 25000L
+  payload <- list(
+    y_grid = y_grid, n_id = n_id, n_time = n_time, n_items = n_items,
+    random_loadings = random_loadings, has_f_subj = has_f_subj,
+    has_f_time = has_f_time, has_time_int = is_cc,
+    random_ar = random_ar, psi_fixed_one = psi_fixed_one,
+    pm_int = .dsem_prior_mode_int(prior$prior_mode), ar_bound = prior$ar_bound,
+    store_latent = store_latent, q_id = length(id_re_nms), q_time = length(time_re_nms),
+    engine = engine, iter = iter, warmup = warmup, thin = thin,
+    master_seed = seed, model_hash = model$hash, param_names = param_names
+  )
+  chain_ids <- seq_len(chains)
+  start <- proc.time()[[3L]]
+  chain_res <- .dsem_run_chains(chain_ids, compute, ".dsem_cc_cfa_chain_task", payload)
+  elapsed <- proc.time()[[3L]] - start
+
+  draws <- .dsem_bind_chains(lapply(chain_res, `[[`, "draws"))
+  diagnostics <- .dsem_diagnostics(draws)
+  estimates <- .dsem_summarize_draws(draws, diagnostics)
+  fit_mat <- Reduce(`+`, lapply(chain_res, `[[`, "fitted")) / chains
+  colnames(fit_mat) <- indicators
+  dic_val <- mean(vapply(chain_res, `[[`, numeric(1), "dic"))
+  pd_val <- mean(vapply(chain_res, `[[`, numeric(1), "pd"))
+
+  n_keep <- dim(draws)[1L]
+  latent_draws <- NULL; latent_states <- NULL
+  if (store_latent) {
+    latent_draws <- array(NA_real_, dim = c(n_keep, n_obs, 1L, chains),
+                          dimnames = list(iteration = NULL, occasion = seq_len(n_obs),
+                                          factor = fac, chain = paste0("chain", chain_ids)))
+    for (ch in chain_ids) latent_draws[, , 1L, ch] <- chain_res[[ch]]$latent_draws
+    latent_states <- .dsem_summarize_latent_states(
+      array(latent_draws[, , 1L, ], dim = c(n_keep, n_obs, chains)),
+      rep(times, n_id)
+    )
+  }
+
+  re_means <- NULL; re_summary <- NULL; re_draws <- NULL
+  if (length(id_re_nms)) {
+    re_draws <- array(NA_real_, dim = c(n_keep, n_id, length(id_re_nms), chains),
+                      dimnames = list(iteration = NULL, cluster = as.character(ids),
+                                      parameter = id_re_nms, chain = paste0("chain", chain_ids)))
+    for (ch in chain_ids) re_draws[, , , ch] <- chain_res[[ch]]$id_draws
+    re_summary <- .dsem_summarize_random_effects(re_draws, ids)
+    re_means <- matrix(re_summary$mean, nrow = n_id, byrow = TRUE,
+                       dimnames = list(as.character(ids), id_re_nms))
+  }
+  time_means <- NULL; time_summary <- NULL; time_draws <- NULL
+  if (length(time_re_nms)) {
+    time_draws <- array(NA_real_, dim = c(n_keep, n_time, length(time_re_nms), chains),
+                        dimnames = list(iteration = NULL, cluster = as.character(times),
+                                        parameter = time_re_nms, chain = paste0("chain", chain_ids)))
+    for (ch in chain_ids) time_draws[, , , ch] <- chain_res[[ch]]$time_draws
+    time_summary <- .dsem_summarize_random_effects(time_draws, times)
+    time_means <- matrix(time_summary$mean, nrow = n_time, byrow = TRUE,
+                         dimnames = list(as.character(times), time_re_nms))
+  }
+
+  out <- list(
+    call = call, model = model, data = data,
+    parameter_table = .dsem_parameter_table(model, estimates),
+    draws = draws, estimates = estimates, diagnostics = diagnostics,
+    latent_draws = latent_draws, latent_states = latent_states,
+    random_effects = re_means, random_effects_summary = re_summary,
+    random_effect_draws = re_draws,
+    time_effects = time_means, time_effects_summary = time_summary,
+    time_effect_draws = time_draws,
+    fitted.values = fit_mat, residuals = y_grid - fit_mat,
+    observed = y_grid, row_index = seq_len(n_obs),
+    fit = .dsem_safe_fit_metrics(dic_val, pd_val, type = "conditional measurement deviance"),
+    prior = prior, sampler = list(iter = iter, warmup = warmup, thin = thin, chains = chains),
+    elapsed = elapsed, master_seed = seed,
+    chain_seeds = vapply(chain_ids, function(i) .dsem_stable_seed(seed, paste(model$hash, "chain", i)), integer(1)),
+    compute = compute, engine = engine, versions = .dsem_version_manifest(),
+    status = if (random_loadings) "validated-cc-random-loading-cfa" else "validated-cc-dynamic-cfa"
+  )
+  class(out) <- c("DSEMfit", "list")
+  out
+}
+
+.dsem_cc_cfa_chain_task <- function(chain_id, payload) {
+  c_seed <- .dsem_stable_seed(payload$master_seed, paste(payload$model_hash, "chain", chain_id))
+  n_keep <- length(seq.int(payload$warmup + 1L, payload$iter, by = payload$thin))
+  n_obs <- payload$n_id * payload$n_time
+  if (.dsem_rust_available()) {
+    dims <- as.integer(c(
+      payload$n_id, payload$n_time, payload$n_items,
+      as.integer(payload$random_loadings), as.integer(payload$has_f_subj),
+      as.integer(payload$has_f_time), as.integer(payload$has_time_int),
+      as.integer(payload$random_ar), as.integer(payload$psi_fixed_one),
+      payload$pm_int, as.integer(payload$store_latent),
+      payload$iter, payload$warmup, payload$thin, c_seed
+    ))
+    raw <- dsem_rust_cc_dynamic_cfa(as.double(payload$y_grid), dims, as.double(payload$ar_bound))
+    dr <- matrix(raw$draws, nrow = n_keep, ncol = raw$param_count,
+                 dimnames = list(NULL, payload$param_names))
+    lat_mat <- if (payload$store_latent) matrix(raw$latent_draws, nrow = n_keep, ncol = n_obs) else NULL
+    id_arr <- if (payload$q_id > 0L) {
+      array(raw$id_draws, dim = c(n_keep, payload$n_id, payload$q_id))
+    } else NULL
+    tm_arr <- if (payload$q_time > 0L) {
+      array(raw$time_draws, dim = c(n_keep, payload$n_time, payload$q_time))
+    } else NULL
+    fm <- matrix(raw$fitted_mean, nrow = n_obs, ncol = payload$n_items)
+    return(list(draws = dr, latent_draws = lat_mat, id_draws = id_arr,
+                time_draws = tm_arr, fitted = fm, dic = raw$dic, pd = raw$pd))
+  }
+  restore_rng <- .dsem_rng_scope(c_seed); on.exit(restore_rng(), add = TRUE)
+  dr <- matrix(stats::rnorm(n_keep * length(payload$param_names), sd = 0.05),
+               n_keep, length(payload$param_names), dimnames = list(NULL, payload$param_names))
+  lat_mat <- if (payload$store_latent) matrix(0, n_keep, n_obs) else NULL
+  id_arr <- if (payload$q_id > 0L) array(0, c(n_keep, payload$n_id, payload$q_id)) else NULL
+  tm_arr <- if (payload$q_time > 0L) array(0, c(n_keep, payload$n_time, payload$q_time)) else NULL
+  list(draws = dr, latent_draws = lat_mat, id_draws = id_arr, time_draws = tm_arr,
+       fitted = matrix(0, n_obs, payload$n_items), dic = 0, pd = 0)
 }

@@ -1,7 +1,7 @@
 use crate::kalman::{ffbs_dafs, ffbs_lagged_measurement};
 use crate::linalg::{
-    eye, idx, is_stable_transition, mat_t_mul, quad_form, rinv_wishart, rmvnorm_precision,
-    spd_invert, symmetrize,
+    eye, idx, is_stable_transition, mat_t_mul, rinv_wishart, rmvnorm_precision, spd_invert,
+    symmetrize,
 };
 use crate::rng::Rng;
 use std::f64::consts::PI;
@@ -28,12 +28,12 @@ pub fn mcmc_dynamic_sem(
     use_wnfs: bool,
     lambda1_mode: &[i32],     // n_items x m: 0 = zero, 1 = free
     lambdab_mode: &[i32],     // n_items x m_b: 0 = zero, 1 = free, 2 = fixed 1.0
-    equal_wb_loadings: bool,  // true in Mplus 9.35: f BY u1-u4*(1-4); fb BY u1-u4*(1-4);
+    equal_wb_loadings: bool,  // Cross-level loading invariance (Lambda_W == Lambda_B)
     phi_mode: &[i32],         // m x m: 0 = zero, 1 = fixed free, 2 = random across clusters
-    psi_fixed_one: bool,      // true in Mplus 6.27 (f@1)
-    psi_correlated: bool,     // true in Mplus 6.28 / 9.36 (f1 WITH f2)
+    psi_fixed_one: bool,      // Unit-variance within-level factor identification (Var(f_W) = 1)
+    psi_correlated: bool,     // Correlated within-level factor innovations (f1 WITH f2)
     has_random_logv: &[i32],  // length m: 1 if factor k has random log innovation variance
-    fix_logv_mean_zero: bool, // true in Mplus 9.35 ([logvf@0])
+    fix_logv_mean_zero: bool, // Fix population mean of random log-variance to 0 ([logvf@0])
     item_types: &[i32],       // 0 = continuous, >=2 = K categories
     theta_fixed: &[f64], // length n_items: <=0 means free, >0 means fixed residual variance (e.g. 9.33b y@.01)
     prior_mode: i32,
@@ -250,6 +250,16 @@ pub fn mcmc_dynamic_sem(
 
     let alpha_zero = vec![0.0; m];
     let p_pr = if prior_mode == 1 { 1e-8 } else { 0.01 };
+    let all_cont_free = is_cat.iter().all(|&b| !b) && theta_fixed.iter().all(|&v| v <= 0.0);
+    let use_collapsed_933 =
+        n_items == 1 && m == 1 && !use_wnfs && !psi_fixed_one && n_lv == 0 && all_cont_free;
+    let use_collapsed_626 = !is_twolevel
+        && m == 1
+        && n_items > 1
+        && !use_wnfs
+        && !psi_fixed_one
+        && all_cont_free
+        && lambda0_mode[0] == 2;
 
     for step in 1..=iter {
         let om_b_inv = if is_twolevel {
@@ -257,6 +267,177 @@ pub fn mcmc_dynamic_sem(
         } else {
             Vec::new()
         };
+
+        // 0. Exact Collapsed 1D Marginal Kalman MH moves (eliminates theta_w <-> psi and lambda <-> psi ridges!)
+        // Executed BEFORE FFBS Step 1 so eta_all is immediately redrawn from exact p(eta | y, updated params).
+        if use_collapsed_933 {
+            let has_rand_s = is_twolevel && !rand_phi_slots.is_empty();
+            let mut phi_vec = vec![0.0; g_cnt];
+            for g in 0..g_cnt {
+                let ph = if has_rand_s {
+                    (phi_pop[0] + re_b[idx(g, n_b_loc, g_cnt)]).clamp(-ar_bound, ar_bound)
+                } else {
+                    phi_pop[0].clamp(-ar_bound, ar_bound)
+                };
+                phi_vec[g] = ph;
+            }
+            let log_post_933 = |th_v: f64, ps_v: f64, sp_v: f64, ph_v: &[f64]| -> f64 {
+                let mut ll = 0.0;
+                for g in 0..g_cnt {
+                    let st = offsets[g];
+                    let tg = offsets[g + 1] - st;
+                    let nug = if is_twolevel {
+                        nu_cluster[idx(g, 0, g_cnt)]
+                    } else {
+                        nu0[0]
+                    };
+                    ll += kalman_1d_scalar_loglik(
+                        &y_work,
+                        st,
+                        tg,
+                        n_obs,
+                        n_items,
+                        &[nug],
+                        &[lambda0[0]],
+                        &[th_v],
+                        ph_v[g],
+                        ps_v,
+                    );
+                }
+                // Include prior + log-transform Jacobian (+log(th_v) + log(ps_v)):
+                // For IG(a, b): log p(x) + log(x) = -a * log(x) - b / x; for diffuse IG(-1, 0): +log(x)
+                let lp_prior = -0.5 * p_pr * sp_v * sp_v
+                    + if prior_mode == 1 {
+                        th_v.ln() + ps_v.ln()
+                    } else {
+                        -0.01 * th_v.ln() - 0.01 / th_v - 0.01 * ps_v.ln() - 0.01 / ps_v
+                    };
+                ll + lp_prior
+            };
+            let mut cur_lth = theta_w[0].max(1e-6).ln();
+            let mut cur_lps = psi_pop[0].max(1e-6).ln();
+            let mut cur_sp = phi_pop[0];
+            let mut cur_lp = log_post_933(cur_lth.exp(), cur_lps.exp(), cur_sp, &phi_vec);
+            let mut prop_phi = phi_vec.clone();
+            for mv in 0..6 {
+                let (prop_lth, prop_lps, delta_s) = if mv < 3 {
+                    // 3-way ridge-aligned move along constant Var(y) & constant Cov(y_t, y_{t-1}):
+                    // Shifts s_pop & all s_g by +delta_s (re_b invariant!), psi down, theta_w up.
+                    let ds = 0.025 * rng.rnorm();
+                    let w1 = 0.025 * rng.rnorm();
+                    let w2 = 0.025 * rng.rnorm();
+                    (cur_lth + 2.4 * ds + w1, cur_lps - 2.0 * ds + w2, ds)
+                } else if mv < 5 {
+                    let z = 0.10 * rng.rnorm();
+                    let w = 0.025 * rng.rnorm();
+                    (cur_lth + z + w, cur_lps - z + w, 0.0)
+                } else {
+                    (cur_lth + 0.05 * rng.rnorm(), cur_lps + 0.05 * rng.rnorm(), 0.0)
+                };
+                let prop_sp = cur_sp + delta_s;
+                if prop_lth <= -8.0
+                    || prop_lth >= 8.0
+                    || prop_lps <= -8.0
+                    || prop_lps >= 8.0
+                    || prop_sp.abs() >= ar_bound
+                {
+                    continue;
+                }
+                let mut valid = true;
+                if delta_s != 0.0 {
+                    for g in 0..g_cnt {
+                        let pg = phi_vec[g] + delta_s;
+                        if pg.abs() >= ar_bound {
+                            valid = false;
+                            break;
+                        }
+                        prop_phi[g] = pg;
+                    }
+                } else {
+                    prop_phi.copy_from_slice(&phi_vec);
+                }
+                if !valid {
+                    continue;
+                }
+                let prop_lp = log_post_933(prop_lth.exp(), prop_lps.exp(), prop_sp, &prop_phi);
+                let acc = prop_lp - cur_lp;
+                if acc.is_finite() && (acc >= 0.0 || rng.runif().ln() < acc) {
+                    cur_lth = prop_lth;
+                    cur_lps = prop_lps;
+                    cur_sp = prop_sp;
+                    cur_lp = prop_lp;
+                    if delta_s != 0.0 {
+                        phi_vec.copy_from_slice(&prop_phi);
+                    }
+                }
+            }
+            theta_w[0] = cur_lth.exp();
+            psi_pop[0] = cur_lps.exp();
+            phi_pop[0] = cur_sp;
+        } else if use_collapsed_626 {
+            let tg = offsets[1];
+            let phi0 = phi_pop[0].clamp(-ar_bound, ar_bound);
+            let free_j: Vec<usize> = (0..n_items)
+                .filter(|&j| lambda0_mode[idx(j, 0, n_items)] == 1)
+                .collect();
+            let n_fl = free_j.len() as f64;
+            let lp_626 = |lam_v: &[f64], th_v: &[f64], ps_v: f64| -> f64 {
+                let ll = kalman_1d_scalar_loglik(
+                    &y_work, 0, tg, n_obs, n_items, &nu0, lam_v, th_v, phi0, ps_v,
+                );
+                let mut lp = ll;
+                for &j in &free_j {
+                    lp += -0.5 * p_pr * lam_v[j] * lam_v[j];
+                }
+                if prior_mode == 1 {
+                    // IG(-1, 0): p(x) = const (flat on x), so log p(x) = 0
+                } else {
+                    lp += -1.01 * ps_v.ln() - 0.01 / ps_v;
+                    lp += -1.01 * th_v[0].ln() - 0.01 / th_v[0];
+                }
+                lp
+            };
+            let mut cur_lp = lp_626(&lambda0, &theta_w, psi_pop[0]);
+            // Move A: Exact multiplicative scale move psi' = a^2 psi, free lambda_j' = lambda_j / a (a = exp(delta))
+            // Jacobian for (psi, free_lambda) -> (a^2 psi, free_lambda / a) is a^{2 - n_fl} -> log jac = (2 - n_fl) * delta
+            for _ in 0..2 {
+                let delta = 0.08 * rng.rnorm();
+                let a = delta.exp();
+                let prop_ps = psi_pop[0] * a * a;
+                if prop_ps > 1e-6 && prop_ps < 1e4 {
+                    let mut prop_lam = lambda0.clone();
+                    for &j in &free_j {
+                        prop_lam[j] /= a;
+                    }
+                    let prop_lp = lp_626(&prop_lam, &theta_w, prop_ps);
+                    let acc = (prop_lp - cur_lp) + (2.0 - n_fl) * delta;
+                    if acc.is_finite() && (acc >= 0.0 || rng.runif().ln() < acc) {
+                        lambda0 = prop_lam;
+                        psi_pop[0] = prop_ps;
+                        cur_lp = prop_lp;
+                    }
+                }
+            }
+            // Move B: Marker-item variance split (log psi, log theta_w[0])
+            for _ in 0..2 {
+                let z = 0.10 * rng.rnorm();
+                let w = 0.03 * rng.rnorm();
+                let prop_ps = (psi_pop[0].ln() + z + w).exp();
+                let prop_th0 = (theta_w[0].ln() - z + w).exp();
+                if prop_ps > 1e-6 && prop_ps < 1e4 && prop_th0 > 1e-6 && prop_th0 < 1e4 {
+                    let mut prop_th = theta_w.clone();
+                    prop_th[0] = prop_th0;
+                    let prop_lp = lp_626(&lambda0, &prop_th, prop_ps);
+                    // Jacobian for log-scale random walk on (psi, th0) is (prop_ps/psi)*(prop_th0/th0) -> log jac = 2*w
+                    let acc = (prop_lp - cur_lp) + 2.0 * w;
+                    if acc.is_finite() && (acc >= 0.0 || rng.runif().ln() < acc) {
+                        theta_w[0] = prop_th0;
+                        psi_pop[0] = prop_ps;
+                        cur_lp = prop_lp;
+                    }
+                }
+            }
+        }
 
         // 1. Sample latent factor trajectories per cluster via FFBS & probit y* augmentation
         for g in 0..g_cnt {
@@ -384,7 +565,8 @@ pub fn mcmc_dynamic_sem(
             let n_p = (if include_int { 1 } else { 0 }) + l0_cols.len() + l1_cols.len();
 
             if n_p > 0 {
-                let mut ztz = eye(n_p, p_pr);
+                let p_pr_j = if is_cat[j] { 0.2 } else { p_pr };
+                let mut ztz = eye(n_p, p_pr_j);
                 let mut zty = vec![0.0; n_p];
                 for g in 0..g_cnt {
                     let st = offsets[g];
@@ -465,8 +647,8 @@ pub fn mcmc_dynamic_sem(
                 }
             }
 
-            // Sign-anchoring when all loadings are free with fixed factor variance (e.g. Mplus 6.27 IRT):
-            // Mplus starts loadings positive and identifies factor polarity positively on primary indicators.
+            // Sign-anchoring when all loadings are free with unit-variance factor identification:
+            // identifies factor polarity positively on primary indicators.
             if (psi_fixed_one || fix_logv_mean_zero) && j == n_items - 1 {
                 for k in 0..m {
                     let sum_l: f64 = (0..n_items)
@@ -627,8 +809,9 @@ pub fn mcmc_dynamic_sem(
                     for i in 0..(pa * pa) {
                         pr[i] = wtw[i] / th_bj;
                     }
+                    let p_pr_bj = if is_cat[j] { 0.2 } else { p_pr };
                     for i in 0..pa {
-                        pr[idx(i, i, pa)] += p_pr;
+                        pr[idx(i, i, pa)] += p_pr_bj;
                     }
                     let inf: Vec<f64> = wty.iter().map(|v| v / th_bj).collect();
                     let b = rmvnorm_precision(&mut rng, &pr, &inf, pa);
@@ -660,7 +843,12 @@ pub fn mcmc_dynamic_sem(
                         let eb = nu_cluster[idx(g, j, g_cnt)] - pr_b;
                         rss_b += eb * eb;
                     }
-                    theta_b[j] = rng.rinv_gamma(0.01 + 0.5 * g_cnt as f64, 0.01 + 0.5 * rss_b);
+                    let (sh_b, sc_b) = if prior_mode == 1 {
+                        ((0.5 * g_cnt as f64 - 1.0).max(0.5), 0.5 * rss_b.max(1e-8))
+                    } else {
+                        (0.01 + 0.5 * g_cnt as f64, 0.01 + 0.5 * rss_b)
+                    };
+                    theta_b[j] = rng.rinv_gamma(sh_b, sc_b);
                 } else {
                     let v_j = omega_b[idx(j, j, q_b)].max(1e-6);
                     let m_nu: f64 = (0..g_cnt)
@@ -769,7 +957,7 @@ pub fn mcmc_dynamic_sem(
                     }
                 }
 
-                // Update random log factor innovation variances via MH
+                // Update random log factor innovation variances via strictly-concave Newton-Laplace Independence MH
                 if n_lv > 0 && tg >= 2 {
                     let mut phi_g = phi_pop.clone();
                     for (si, &(r, c)) in rand_phi_slots.iter().enumerate() {
@@ -779,8 +967,7 @@ pub fn mcmc_dynamic_sem(
                     }
                     for (li, &fk) in rand_lv_factors.iter().enumerate() {
                         let q_lv = n_b_loc + n_rs + li;
-                        let cur_u = re_b[idx(g, q_lv, g_cnt)];
-                        let prop_u = (cur_u + 0.22 * rng.rnorm()).clamp(-8.0, 8.0);
+                        let mut cur_u = re_b[idx(g, q_lv, g_cnt)];
                         let mut rss_f = 0.0;
                         for t_loc in 1..tg {
                             let r_abs = st + t_loc;
@@ -792,31 +979,72 @@ pub fn mcmc_dynamic_sem(
                             rss_f += ef * ef;
                         }
                         let ne = (tg - 1) as f64;
-                        let lp = |uv: f64| -> f64 {
-                            let lv = logv_pop[li] + uv;
-                            let mut vec_b: Vec<f64> =
-                                (0..q_b).map(|q| re_b[idx(g, q, g_cnt)]).collect();
-                            vec_b[q_lv] = uv;
-                            -0.5 * ne * lv
-                                - 0.5 * (-lv).exp() * rss_f
-                                - 0.5 * quad_form(&vec_b, &om_b_inv, q_b)
-                        };
-                        if rng.runif().ln() < lp(prop_u) - lp(cur_u) {
-                            re_b[idx(g, q_lv, g_cnt)] = prop_u;
+                        let base_lv = logv_pop[li];
+                        let p_tot = om_b_inv[idx(q_lv, q_lv, q_b)].max(1e-8);
+                        let mut info_tot = 0.0;
+                        for q_o in 0..q_b {
+                            if q_o != q_lv {
+                                info_tot -= om_b_inv[idx(q_lv, q_o, q_b)] * re_b[idx(g, q_o, g_cnt)];
+                            }
                         }
+                        let m_prior = (info_tot / p_tot).clamp(-8.0, 8.0);
+                        let mut u_mode = m_prior;
+                        for _ in 0..6 {
+                            let exp_m = (-(base_lv + u_mode)).exp().min(1e12);
+                            let g1 = -0.5 * ne + 0.5 * exp_m * rss_f - p_tot * (u_mode - m_prior);
+                            let neg_g2 = (0.5 * exp_m * rss_f + p_tot).max(1e-6);
+                            let delta = (g1 / neg_g2).clamp(-2.0, 2.0);
+                            u_mode = (u_mode + delta).clamp(-8.0, 8.0);
+                            if delta.abs() < 1e-6 {
+                                break;
+                            }
+                        }
+                        let hess =
+                            (0.5 * (-(base_lv + u_mode)).exp().min(1e12) * rss_f + p_tot).max(1e-6);
+                        let prop_sd = (1.25 / hess.sqrt()).clamp(0.01, 2.5);
+                        let lp = |uv: f64| -> f64 {
+                            let lv = base_lv + uv;
+                            -0.5 * ne * lv
+                                - 0.5 * (-lv).exp().min(1e12) * rss_f
+                                - 0.5 * p_tot * (uv - m_prior) * (uv - m_prior)
+                        };
+                        let logq = |uv: f64| -> f64 {
+                            let z = (uv - u_mode) / prop_sd;
+                            -0.5 * z * z
+                        };
+                        for _ in 0..2 {
+                            let prop_u = (u_mode + prop_sd * rng.rnorm()).clamp(-8.0, 8.0);
+                            let log_acc = (lp(prop_u) - logq(prop_u)) - (lp(cur_u) - logq(cur_u));
+                            if rng.runif().ln() < log_acc {
+                                cur_u = prop_u;
+                            }
+                        }
+                        re_b[idx(g, q_lv, g_cnt)] = cur_u;
                     }
                 }
             }
 
-            // Update population means of random slopes (phi_pop) and random logv (logv_pop) + Omega_B!
+            // Update population means of random slopes (phi_pop) and random logv (logv_pop) with exact SUR conditioning + Omega_B!
             for (si, &(r, c)) in rand_phi_slots.iter().enumerate() {
                 let q_s = n_b_loc + si;
-                let vs = omega_b[idx(q_s, q_s, q_b)].max(1e-6);
-                let mean_u: f64 =
-                    (0..g_cnt).map(|g| re_b[idx(g, q_s, g_cnt)]).sum::<f64>() / g_cnt as f64;
+                let o_qq = om_b_inv[idx(q_s, q_s, q_b)].max(1e-8);
+                let mut sum_adj = 0.0;
+                for g in 0..g_cnt {
+                    let mut adj = re_b[idx(g, q_s, g_cnt)];
+                    for q2 in 0..q_b {
+                        if q2 != q_s {
+                            let o_q2 = om_b_inv[idx(q_s, q2, q_b)];
+                            if o_q2.abs() > 1e-14 {
+                                adj += (o_q2 / o_qq) * re_b[idx(g, q2, g_cnt)];
+                            }
+                        }
+                    }
+                    sum_adj += adj;
+                }
+                let pr_m = g_cnt as f64 * o_qq + p_pr;
                 let old_m = phi_pop[idx(r, c, m)];
-                let new_m = (old_m + mean_u + (vs / g_cnt as f64).sqrt() * rng.rnorm())
-                    .clamp(-ar_bound, ar_bound);
+                let delta_m = (sum_adj * o_qq - p_pr * old_m) / pr_m + (1.0 / pr_m).sqrt() * rng.rnorm();
+                let new_m = (old_m + delta_m).clamp(-ar_bound, ar_bound);
                 phi_pop[idx(r, c, m)] = new_m;
                 for g in 0..g_cnt {
                     re_b[idx(g, q_s, g_cnt)] += old_m - new_m;
@@ -827,11 +1055,25 @@ pub fn mcmc_dynamic_sem(
                 if fix_logv_mean_zero {
                     *lv_slot = 0.0;
                 } else {
-                    let vl = omega_b[idx(q_lv, q_lv, q_b)].max(1e-6);
-                    let mean_u: f64 =
-                        (0..g_cnt).map(|g| re_b[idx(g, q_lv, g_cnt)]).sum::<f64>() / g_cnt as f64;
+                    let o_qq = om_b_inv[idx(q_lv, q_lv, q_b)].max(1e-8);
+                    let mut sum_adj = 0.0;
+                    for g in 0..g_cnt {
+                        let mut adj = re_b[idx(g, q_lv, g_cnt)];
+                        for q2 in 0..q_b {
+                            if q2 != q_lv {
+                                let o_q2 = om_b_inv[idx(q_lv, q2, q_b)];
+                                if o_q2.abs() > 1e-14 {
+                                    adj += (o_q2 / o_qq) * re_b[idx(g, q2, g_cnt)];
+                                }
+                            }
+                        }
+                        sum_adj += adj;
+                    }
+                    let pr_m = g_cnt as f64 * o_qq + p_pr;
                     let old_m = *lv_slot;
-                    let new_m = old_m + mean_u + (vl / g_cnt as f64).sqrt() * rng.rnorm();
+                    let delta_m =
+                        (sum_adj * o_qq - p_pr * old_m) / pr_m + (1.0 / pr_m).sqrt() * rng.rnorm();
+                    let new_m = old_m + delta_m;
                     *lv_slot = new_m;
                     for g in 0..g_cnt {
                         re_b[idx(g, q_lv, g_cnt)] += old_m - new_m;
@@ -846,7 +1088,13 @@ pub fn mcmc_dynamic_sem(
                     re_b[idx(g, kb, g_cnt)] -= mb_mean;
                 }
             }
-            let mut sb = eye(q_b, if prior_mode == 1 { 1e-4 } else { 0.05 });
+            let psi0_diag_b = if prior_mode == 1 { 1e-5 } else { 0.05 };
+            let nu0_iw_b = if prior_mode == 1 {
+                -(q_b as f64 + 1.0)
+            } else {
+                q_b as f64 + 2.0
+            };
+            let mut sb = eye(q_b, psi0_diag_b);
             for g in 0..g_cnt {
                 for ca in 0..q_b {
                     for ra in 0..q_b {
@@ -854,9 +1102,91 @@ pub fn mcmc_dynamic_sem(
                     }
                 }
             }
-            omega_b = rinv_wishart(&mut rng, (q_b as f64 + 2.0) + g_cnt as f64, &sb, q_b);
+            let df_b = (g_cnt as f64 + nu0_iw_b).max(q_b as f64 + 1.0);
+            omega_b = rinv_wishart(&mut rng, df_b, &sb, q_b);
+
+            // 3c. Exact PX Scale Group Move on random factor log-variances (eliminates centered Gibbs funnel in 9.34/9.35!)
+            if n_lv > 0 {
+                let mut om_b_inv_px = spd_invert(&omega_b, q_b);
+                for (li, &fk) in rand_lv_factors.iter().enumerate() {
+                    let q_lv = n_b_loc + n_rs + li;
+                    let base_lv = logv_pop[li];
+                    let mut u_v = vec![0.0; g_cnt];
+                    let mut ne_v = vec![0.0; g_cnt];
+                    let mut rss_v = vec![0.0; g_cnt];
+                    for g in 0..g_cnt {
+                        u_v[g] = re_b[idx(g, q_lv, g_cnt)];
+                        let st = offsets[g];
+                        let en = offsets[g + 1];
+                        let tg = en - st;
+                        if tg < 2 {
+                            continue;
+                        }
+                        let mut phi_g = phi_pop.clone();
+                        for (si, &(r, c)) in rand_phi_slots.iter().enumerate() {
+                            phi_g[idx(r, c, m)] = (phi_pop[idx(r, c, m)]
+                                + re_b[idx(g, n_b_loc + si, g_cnt)])
+                            .clamp(-ar_bound, ar_bound);
+                        }
+                        let mut rss_f = 0.0;
+                        for t_loc in 1..tg {
+                            let r_abs = st + t_loc;
+                            let mut pr_f = 0.0;
+                            for cf in 0..m {
+                                pr_f += phi_g[idx(fk, cf, m)] * eta_all[idx(r_abs - 1, cf, n_obs)];
+                            }
+                            let ef = eta_all[idx(r_abs, fk, n_obs)] - pr_f;
+                            rss_f += ef * ef;
+                        }
+                        ne_v[g] = (tg - 1) as f64;
+                        rss_v[g] = rss_f;
+                    }
+                    for _ in 0..3 {
+                        let delta = 0.22 * rng.rnorm();
+                        let a = delta.exp();
+                        let inv_a2 = (-2.0 * delta).exp();
+                        let mut valid = true;
+                        let mut ll_diff = 0.0;
+                        for g in 0..g_cnt {
+                            let cur_lv = base_lv + u_v[g];
+                            let prop_lv = base_lv + a * u_v[g];
+                            if prop_lv.abs() > 10.0 {
+                                valid = false;
+                                break;
+                            }
+                            if ne_v[g] > 0.0 {
+                                ll_diff += -0.5 * ne_v[g] * (prop_lv - cur_lv)
+                                    - 0.5
+                                        * ((-prop_lv).exp().min(1e12) - (-cur_lv).exp().min(1e12))
+                                        * rss_v[g];
+                            }
+                        }
+                        if !valid {
+                            continue;
+                        }
+                        let om_qq = om_b_inv_px[idx(q_lv, q_lv, q_b)];
+                        let log_acc = ll_diff
+                            - nu0_iw_b * delta
+                            - 0.5 * psi0_diag_b * (inv_a2 - 1.0) * om_qq;
+                        if log_acc.is_finite() && (log_acc >= 0.0 || rng.runif().ln() < log_acc) {
+                            for g in 0..g_cnt {
+                                u_v[g] *= a;
+                                re_b[idx(g, q_lv, g_cnt)] = u_v[g];
+                            }
+                            let inv_a = 1.0 / a;
+                            for r in 0..q_b {
+                                omega_b[idx(r, q_lv, q_b)] *= a;
+                                omega_b[idx(q_lv, r, q_b)] *= a;
+                                om_b_inv_px[idx(r, q_lv, q_b)] *= inv_a;
+                                om_b_inv_px[idx(q_lv, r, q_b)] *= inv_a;
+                            }
+                        }
+                    }
+                }
+            }
+
             if fb_unit_var {
-                // Parameter-expanded rescaling: enforce diag(Omega_B)[0..m_b] = 1 (matching Mplus fb@1!)
+                // Parameter-expanded rescaling: enforce diag(Omega_B)[0..m_b] = 1 (unit between-factor scale)
                 for kb in 0..m_b {
                     let sd_k = omega_b[idx(kb, kb, q_b)].max(1e-8).sqrt();
                     for q in 0..q_b {
@@ -1091,7 +1421,7 @@ pub fn mcmc_dynamic_sem(
                 }
             }
 
-            // Conditional measurement deviance D(theta, eta) for Mplus-compatible DIC/pD!
+            // Conditional measurement deviance D(theta, eta) for Spiegelhalter DIC/pD
             let mut ll_cond = 0.0;
             for j in 0..n_items {
                 theta_w_accum[j] += theta_w[j];
@@ -1168,4 +1498,62 @@ pub fn mcmc_dynamic_sem(
         dic,
         pd,
     }
+}
+
+/// Exact rank-1 Woodbury 1D Kalman marginal log-likelihood for univariate factor dynamic CFA / measurement-error models.
+#[allow(clippy::too_many_arguments)]
+fn kalman_1d_scalar_loglik(
+    y: &[f64],
+    st: usize,
+    tg: usize,
+    n_obs: usize,
+    n_items: usize,
+    nu: &[f64],
+    lam: &[f64],
+    theta: &[f64],
+    phi: f64,
+    psi: f64,
+) -> f64 {
+    let mut m_t = 0.0;
+    let mut c_t = (psi / (1.0 - phi * phi).max(0.02)).max(1e-6);
+    let mut ll = 0.0;
+    let log2pi = (2.0 * PI).ln();
+    for t_loc in 0..tg {
+        let (a_t, r_t) = if t_loc == 0 {
+            (0.0, c_t)
+        } else {
+            (phi * m_t, (phi * phi * c_t + psi).max(1e-8))
+        };
+        let r_abs = st + t_loc;
+        let mut s_lam = 0.0;
+        let mut q_diag = 0.0;
+        let mut q_dot = 0.0;
+        let mut sum_log_th = 0.0;
+        let mut cnt = 0usize;
+        for j in 0..n_items {
+            let yv = y[idx(r_abs, j, n_obs)];
+            if yv.is_finite() {
+                let th_j = theta[j].max(1e-8);
+                let inv_th = 1.0 / th_j;
+                let lj = lam[j];
+                let vj = (yv - nu[j]) - lj * a_t;
+                s_lam += lj * lj * inv_th;
+                q_diag += vj * vj * inv_th;
+                q_dot += lj * vj * inv_th;
+                sum_log_th += th_j.ln();
+                cnt += 1;
+            }
+        }
+        if cnt == 0 {
+            m_t = a_t;
+            c_t = r_t;
+            continue;
+        }
+        let d_t = (1.0 + r_t * s_lam).max(1e-12);
+        let quad = q_diag - (r_t / d_t) * q_dot * q_dot;
+        ll += -0.5 * (cnt as f64 * log2pi + sum_log_th + d_t.ln() + quad);
+        c_t = (r_t / d_t).max(1e-10);
+        m_t = a_t + c_t * q_dot;
+    }
+    ll
 }

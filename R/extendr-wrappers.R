@@ -27,8 +27,8 @@ dsem_rust_twolevel <- function(y, x, cluster_sizes, w, z, lags, masks, dims, hyp
 }
 
 #' @keywords internal
-dsem_rust_threelevel <- function(y, x, l2_sizes, l3_of_l2, w2, w3, lags, masks, dims, beta_sd) {
-  .Call(wrap__dsem_rust_threelevel, y, x, l2_sizes, l3_of_l2, w2, w3, lags, masks, dims, beta_sd)
+dsem_rust_threelevel <- function(y, x, l2_sizes, l3_of_l2, w2, w3, lags, masks, dims, hyper) {
+  .Call(wrap__dsem_rust_threelevel, y, x, l2_sizes, l3_of_l2, w2, w3, lags, masks, dims, hyper)
 }
 
 #' @keywords internal
@@ -39,6 +39,21 @@ dsem_rust_crossclassified <- function(y_grid, x_grid, w_id, w_time, lags, masks,
 #' @keywords internal
 dsem_rust_dynamic_sem <- function(y, cluster_sizes, lambda0_init, theta_fixed, modes, dims, ar_bound) {
   .Call(wrap__dsem_rust_dynamic_sem, y, cluster_sizes, lambda0_init, theta_fixed, modes, dims, ar_bound)
+}
+
+#' @keywords internal
+dsem_rust_arma11 <- function(y, cluster_sizes, dims, hyper) {
+  .Call(wrap__dsem_rust_arma11, y, cluster_sizes, dims, hyper)
+}
+
+#' @keywords internal
+dsem_rust_cc_dynamic_cfa <- function(y_grid, dims, ar_bound) {
+  .Call(wrap__dsem_rust_cc_dynamic_cfa, y_grid, dims, ar_bound)
+}
+
+#' @keywords internal
+dsem_rust_ct_dsem <- function(y, x, time, cluster_sizes, dims, beta_sd) {
+  .Call(wrap__dsem_rust_ct_dsem, y, x, time, cluster_sizes, dims, beta_sd)
 }
 
 # nolint end

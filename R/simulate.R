@@ -291,7 +291,17 @@ simulate_dsem <- function(model = NULL, n = 200L, intercept = 0, ar = 0.5,
 #' @param compute Compute specification from [dsem_compute()].
 #' @param fit_args Named list passed to [dsem()].
 #' @param truth Optional named vector of true parameter values.
-#' @return A `DSEMmontecarlo` list with replication estimates and summaries.
+#' @param convergence Replication acceptance rule: `"basic"` (default) retains
+#'   all completed replications and reports convergence rates; `"strict"`
+#'   additionally requires every retained replication to pass strict MCMC
+#'   convergence (`max(Rhat) < rhat_max`) and positive-definite estimated
+#'   covariance matrices, summarizing only strictly converged replications when
+#'   any succeed.
+#' @param rhat_max Maximum acceptable split-\eqn{\hat{R}} threshold used for
+#'   convergence flags (default `1.05` for `"strict"`, `1.01` for `"basic"`
+#'   legacy flag if omitted).
+#' @return A `DSEMmontecarlo` list with replication estimates, strict/basic
+#'   convergence diagnostics, and parameter summaries.
 #' @examples
 #' mc <- dsem_monte_carlo(
 #'   "y ~ lag(y, 1)", replications = 2,
@@ -305,9 +315,15 @@ dsem_monte_carlo <- function(model, replications = 100L,
                              generator = function(seed) simulate_dsem(seed = seed),
                              seed = 20260813L, compute = dsem_compute(),
                              fit_args = list(chains = 2L, iter = 1000L, warmup = 500L),
-                             truth = NULL) {
+                             truth = NULL,
+                             convergence = c("basic", "strict"),
+                             rhat_max = 1.05) {
   replications <- .dsem_integer(replications, "replications", 1)
   seed <- .dsem_integer(seed, "seed", 0)
+  convergence <- match.arg(convergence)
+  if (!is.numeric(rhat_max) || length(rhat_max) != 1L || !is.finite(rhat_max) || rhat_max <= 1) {
+    .dsem_abort("`rhat_max` must be a finite number strictly greater than 1.")
+  }
   if (!inherits(compute, "DSEMcompute")) .dsem_abort("`compute` must come from dsem_compute().")
   if (!is.function(generator)) .dsem_abort("`generator` must be a function.")
   .dsem_named_controls(fit_args)
@@ -322,17 +338,38 @@ dsem_monte_carlo <- function(model, replications = 100L,
   rep_seeds <- vapply(seq_len(replications), function(i) {
     .dsem_stable_seed(seed, paste(model$hash, "replication", i))
   }, integer(1))
+  is_pd_cov <- function(fit_obj) {
+    est <- fit_obj$estimates
+    var_rows <- grepl("^(var_|between_var_|l2_var_|l3_var_|id_var_|time_var_|sigma2|factor_variance)", est$parameter)
+    if (any(var_rows) && any(!is.finite(est$mean[var_rows]) | est$mean[var_rows] <= 0)) {
+      return(FALSE)
+    }
+    vc <- tryCatch(stats::vcov(fit_obj), error = function(e) NULL)
+    if (is.matrix(vc) && nrow(vc) > 0L) {
+      ev <- tryCatch(eigen(0.5 * (vc + t(vc)), symmetric = TRUE, only.values = TRUE)$values,
+                     error = function(e) -1)
+      if (any(!is.finite(ev)) || min(ev) < -1e-6) return(FALSE)
+    }
+    TRUE
+  }
   run_one <- function(i) {
     dat <- generator(seed = rep_seeds[i])
     args <- c(list(model = model, data = dat,
                    seed = .dsem_stable_seed(seed, paste("fit", i)),
                    compute = dsem_compute()), fit_args)
     fit <- do.call(dsem, args)
+    rhat_ok <- dim(fit$draws)[3L] >= 2L &&
+      all(is.finite(fit$diagnostics$rhat) & fit$diagnostics$rhat < rhat_max)
+    ess_ok <- all(is.finite(fit$diagnostics$ess_bulk) & fit$diagnostics$ess_bulk >= 100) &&
+      all(is.finite(fit$diagnostics$ess_tail) & fit$diagnostics$ess_tail >= 100)
+    pd_ok <- is_pd_cov(fit)
+    conv_basic <- dim(fit$draws)[3L] >= 2L &&
+      all(is.finite(fit$diagnostics$rhat) & fit$diagnostics$rhat < 1.01) &&
+      ess_ok
+    conv_strict <- rhat_ok && ess_ok && pd_ok
     data.frame(replication = i, seed = rep_seeds[i], fit$estimates,
-               converged = dim(fit$draws)[3L] >= 2L &&
-                 all(is.finite(fit$diagnostics$rhat) & fit$diagnostics$rhat < 1.01) &&
-                 all(is.finite(fit$diagnostics$ess_bulk) & fit$diagnostics$ess_bulk >= 100) &&
-                 all(is.finite(fit$diagnostics$ess_tail) & fit$diagnostics$ess_tail >= 100),
+               pd_ok = pd_ok,
+               converged = if (identical(convergence, "strict")) conv_strict else conv_basic,
                stringsAsFactors = FALSE)
   }
   ids <- seq_len(replications)
@@ -344,7 +381,12 @@ dsem_monte_carlo <- function(model, replications = 100L,
     lapply(ids, run_one)
   }
   estimates <- do.call(rbind, estimates)
-  summary <- stats::aggregate(cbind(mean, sd) ~ parameter, estimates, mean)
+  est_for_summary <- if (identical(convergence, "strict") && any(estimates$converged)) {
+    estimates[estimates$converged, , drop = FALSE]
+  } else {
+    estimates
+  }
+  summary <- stats::aggregate(cbind(mean, sd) ~ parameter, est_for_summary, mean)
   names(summary)[names(summary) == "mean"] <- "mean_estimate"
   summary$convergence_rate <- vapply(summary$parameter, function(p) {
     mean(estimates$converged[estimates$parameter == p])
@@ -353,14 +395,16 @@ dsem_monte_carlo <- function(model, replications = 100L,
     summary$truth <- unname(truth[summary$parameter])
     summary$bias <- summary$mean_estimate - summary$truth
     summary$rmse <- vapply(seq_len(nrow(summary)), function(j) {
-      sqrt(mean((estimates$mean[estimates$parameter == summary$parameter[j]] - summary$truth[j])^2))
+      sqrt(mean((est_for_summary$mean[est_for_summary$parameter == summary$parameter[j]] - summary$truth[j])^2))
     }, numeric(1))
     summary$coverage <- vapply(seq_len(nrow(summary)), function(j) {
-      e <- estimates[estimates$parameter == summary$parameter[j], ]
+      e <- est_for_summary[est_for_summary$parameter == summary$parameter[j], ]
       mean(e$q2.5 <= summary$truth[j] & e$q97.5 >= summary$truth[j])
     }, numeric(1))
   }
   out <- list(model = model, estimates = estimates, summary = summary,
+              convergence = convergence,
+              n_completed = length(unique(est_for_summary$replication)),
               master_seed = seed, replication_seeds = rep_seeds,
               compute = compute)
   class(out) <- c("DSEMmontecarlo", "list")

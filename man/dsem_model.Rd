@@ -16,6 +16,7 @@ dsem_model(
   censored = NULL,
   tinterval = NULL,
   centering = c("latent", "groupmean", "grandmean", "none"),
+  continuous_time = FALSE,
   metadata = list()
 )
 }
@@ -54,6 +55,10 @@ names, or a named list mapping outcome names to \code{"below"}, \code{"above"},
 \code{"latent"} (default latent variable decomposition across 2 or 3 levels),
 \code{"groupmean"}, \code{"grandmean"}, or \code{"none"}.}
 
+\item{continuous_time}{Logical; if \code{TRUE}, compiles the model as a
+continuous-time Ornstein-Uhlenbeck dynamic model (\code{CT-DSEM} / \code{CT-RDSEM})
+using exact matrix-exponential transitions over irregular time intervals.}
+
 \item{metadata}{Optional named list retained with the compiled model.}
 }
 \value{
@@ -61,13 +66,15 @@ A \code{DSEMmodel} object.
 }
 \description{
 Compiles either the \code{DSEMr} extension of \code{lavaan} syntax or standard
-section-based SEM/Mplus-compatible model scripts into a canonical \code{DSEMmodel}
+section-based SEM model scripts into a canonical \code{DSEMmodel}
 intermediate representation. Supports single-level (\code{N=1}), two-level
-(\verb{TWOLEVEL RANDOM}), three-level (\verb{THREELEVEL RANDOM} / DSEM3), and
-cross-classified (\verb{CROSSCLASSIFIED RANDOM}) dynamic structural equation
-models, including latent variable centering, random slopes, random log
-innovation variances, residual dynamics (RDSEM), dynamic factor models
-(DAFS and WNFS), binary/ordinal probit links, Tobit censored outcomes, and
+(\verb{TWOLEVEL RANDOM}), three-level (\verb{THREELEVEL RANDOM} / DSEM3),
+cross-classified (\verb{CROSSCLASSIFIED RANDOM}), and continuous-time
+(\code{continuous_time = TRUE}) dynamic structural equation models, including
+latent variable centering, random slopes, random log innovation variances,
+random residual covariances, residual dynamics (RDSEM), ARMA(1,1), dynamic
+factor models (DAFS, WNFS, cross-classified CFA, and random factor
+loadings), binary/ordinal probit links, Tobit censored outcomes, and
 penalized shrinkage priors (PSEM).
 }
 \examples{

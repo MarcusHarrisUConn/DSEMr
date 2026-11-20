@@ -141,8 +141,9 @@
   for (name in allowed) {
     value <- prior[[name]]
     if (name == "prior_mode") {
-      if (!is.character(value) || length(value) != 1L || !value %in% c("default", "mplus", "penalized")) {
-        .dsem_abort("`prior_mode` must be \"default\", \"mplus\", or \"penalized\".")
+      if (!is.character(value) || length(value) != 1L ||
+          !value %in% c("default", "diffuse", "mplus", "penalized")) {
+        .dsem_abort("`prior_mode` must be \"default\", \"diffuse\", \"mplus\", or \"penalized\".")
       }
     } else if (name == "omega_scale") {
       if (!is.matrix(value) || !is.numeric(value) || nrow(value) != ncol(value) ||
@@ -161,7 +162,103 @@
 }
 
 .dsem_prior_mode_int <- function(mode) {
-  switch(mode, default = 0L, mplus = 1L, penalized = 2L, 0L)
+  switch(mode, default = 0L, diffuse = 1L, mplus = 1L, penalized = 2L, 0L)
+}
+
+.dsem_detect_shared_cov_factor <- function(model) {
+  t <- model$terms
+  meta <- model$term_meta
+  w_regs <- .dsem_active_regs(t, meta, "within")
+  outcomes <- unique(w_regs$lhs)
+  if (length(outcomes) < 2L) return(NULL)
+
+  # Case A: Ex 9.32b latent residual covariance factor `f BY y1@1 y2@1; logvf | f;`
+  meas_w <- which(t$op == "=~" & t$level == "within")
+  if (length(meas_w)) {
+    w_facs <- unique(t$lhs[meas_w])
+    for (fac in w_facs) {
+      f_rows <- meas_w[t$lhs[meas_w] == fac]
+      inds <- t$rhs[f_rows]
+      # Must load strictly onto observed regression outcomes with fixed loadings,
+      # have no dynamic regressions of its own, and carry a random log-variance
+      all_outcomes <- length(inds) >= 2L && all(inds %in% outcomes)
+      has_dyn_f <- any(w_regs$lhs == fac | w_regs$rhs == fac)
+      all_fixed <- !is.null(meta) && all(!meta$is_free[f_rows] & !is.na(meta$fixed_value[f_rows]))
+      lv_hit <- which(t$op == "~~" & t$level == "within" & t$lhs == fac & t$rhs == fac & t$random)
+      if (all_outcomes && !has_dyn_f && all_fixed && length(lv_hit)) {
+        loads <- stats::setNames(rep(0, length(outcomes)), outcomes)
+        for (idx_r in f_rows) {
+          loads[t$rhs[idx_r]] <- as.double(meta$fixed_value[idx_r])
+        }
+        lbl <- t$label[lv_hit[1L]]
+        return(list(
+          factor = fac,
+          logvf_label = if (nzchar(lbl)) lbl else paste0("logv_", fac),
+          loadings = loads
+        ))
+      }
+    }
+  }
+
+  # Case B: Direct lavaan shorthand `logvf | y1 ~~ y2`
+  cov_hit <- which(t$op == "~~" & t$level == "within" &
+                     t$lhs != t$rhs & t$random &
+                     t$lhs %in% outcomes & t$rhs %in% outcomes)
+  if (length(cov_hit)) {
+    loads <- stats::setNames(rep(0, length(outcomes)), outcomes)
+    r0 <- cov_hit[1L]
+    loads[t$lhs[r0]] <- 1.0
+    loads[t$rhs[r0]] <- 1.0
+    lbl <- t$label[r0]
+    return(list(
+      factor = character(),
+      logvf_label = if (nzchar(lbl)) lbl else "logvf",
+      loadings = loads
+    ))
+  }
+  NULL
+}
+
+.dsem_apply_define <- function(data, define_ops, id = NULL) {
+  if (!is.data.frame(data) || is.null(define_ops) || !length(define_ops)) return(data)
+  df <- data
+  id_col <- if (!is.null(id) && length(id) && id[1L] %in% names(df)) id[1L] else NULL
+  for (op in define_ops) {
+    if (identical(op$type, "standardize")) {
+      for (v in op$vars) {
+        if (v %in% names(df) && is.numeric(df[[v]])) {
+          s <- stats::sd(df[[v]], na.rm = TRUE)
+          if (is.finite(s) && s > 0) df[[v]] <- (df[[v]] - mean(df[[v]], na.rm = TRUE)) / s
+        }
+      }
+    } else if (identical(op$type, "assign")) {
+      expr_str <- op$expr
+      # Replace Mplus-style ** power operator and common uppercase math helpers
+      expr_r <- gsub("\\*\\*", "^", expr_str)
+      expr_r <- gsub("\\bLOG\\s*\\(", "log(", expr_r, ignore.case = TRUE)
+      expr_r <- gsub("\\bEXP\\s*\\(", "exp(", expr_r, ignore.case = TRUE)
+      expr_r <- gsub("\\bSQRT\\s*\\(", "sqrt(", expr_r, ignore.case = TRUE)
+      expr_r <- gsub("\\bABS\\s*\\(", "abs(", expr_r, ignore.case = TRUE)
+      eval_env <- list2env(as.list(df), parent = baseenv())
+      eval_env$CLUSTER_MEAN <- function(x) {
+        if (is.null(id_col)) return(rep(mean(x, na.rm = TRUE), length(x)))
+        stats::ave(as.double(x), df[[id_col]], FUN = function(z) mean(z, na.rm = TRUE))
+      }
+      eval_env$cluster_mean <- eval_env$CLUSTER_MEAN
+      eval_env$MEAN <- function(x) mean(x, na.rm = TRUE)
+      eval_env$mean <- eval_env$MEAN
+      eval_env$SD <- function(x) stats::sd(x, na.rm = TRUE)
+      eval_env$sd <- eval_env$SD
+      val <- tryCatch(
+        eval(parse(text = expr_r), envir = eval_env),
+        error = function(e) .dsem_abort("Failed to evaluate DEFINE statement `%s = %s`: %s",
+                                        op$lhs, op$expr, conditionMessage(e))
+      )
+      if (length(val) == 1L) val <- rep(val, nrow(df))
+      df[[op$lhs]] <- as.double(val)
+    }
+  }
+  df
 }
 
 .dsem_spd_solve <- function(a, b = NULL) {

@@ -525,9 +525,101 @@ dsem_irf <- function(object, horizon = 10L, orthogonal = TRUE, prob = 0.95) {
 
   terms <- object$model$terms
   w_regs <- .dsem_active_regs(terms, object$model$term_meta, "within")
-  has_latent <- any(terms$op == "=~" & terms$level == "within")
+  shared_cov <- .dsem_detect_shared_cov_factor(object$model)
+  shared_fac <- if (!is.null(shared_cov)) shared_cov$factor else character()
+
+  # Continuous-Time DSEM IRF: exact exp(A * h) %*% B0 over horizons h = 0..horizon!
+  if (isTRUE(object$model$continuous_time)) {
+    w_vars <- terms[terms$op == "~~" & terms$level == "within" & terms$lhs == terms$rhs, , drop = FALSE]
+    vars <- unique(c(w_regs$lhs, w_vars$lhs))
+    d <- length(vars)
+    use_idx <- if (n_tot > 1000L) unique(round(seq(1, n_tot, length.out = 1000L))) else seq_len(n_tot)
+    n_use <- length(use_idx)
+    irf_arr <- array(0, dim = c(n_use, d, d, horizon + 1L))
+    expm_r <- function(m_mat) {
+      dm <- nrow(m_mat)
+      if (dm == 1L) return(matrix(exp(m_mat[1L, 1L]), 1L, 1L))
+      nrm <- max(rowSums(abs(m_mat)))
+      s_pow <- if (nrm > 0.5) ceiling(log2(nrm / 0.5)) else 0L
+      a <- m_mat / (2^s_pow)
+      res <- diag(1, dm)
+      term <- diag(1, dm)
+      for (k in 1:18) {
+        term <- (term %*% a) / k
+        res <- res + term
+      }
+      for (k in seq_len(s_pow)) res <- res %*% res
+      res
+    }
+    for (si in seq_len(n_use)) {
+      s <- use_idx[si]
+      a_mat <- matrix(0, d, d)
+      for (i in seq_len(d)) {
+        for (j in seq_len(d)) {
+          nm <- if (d == 1L) {
+            intersect(c(paste0("mean_drift_", vars[1L]), paste0("drift_", vars[1L])), params)[1L]
+          } else {
+            paste0("drift_", vars[i], "_on_", vars[j])
+          }
+          if (!is.na(nm) && nm %in% params) a_mat[i, j] <- flat[s, nm]
+        }
+      }
+      q_mat <- diag(1, d)
+      for (i in seq_len(d)) {
+        v_nm <- paste0("diffusion_", vars[i])
+        lv_nm <- paste0("mean_log_diffusion_", vars[i])
+        if (v_nm %in% params) {
+          q_mat[i, i] <- max(flat[s, v_nm], 1e-8)
+        } else if (lv_nm %in% params) {
+          q_mat[i, i] <- exp(min(max(flat[s, lv_nm], -8), 8))
+        }
+        if (i < d) {
+          for (j in (i + 1L):d) {
+            cnm <- intersect(c(paste0("diffusion_cov_", vars[j], "_", vars[i]),
+                               paste0("diffusion_cov_", vars[i], "_", vars[j])), params)
+            if (length(cnm)) {
+              q_mat[i, j] <- flat[s, cnm[1L]]
+              q_mat[j, i] <- q_mat[i, j]
+            }
+          }
+        }
+      }
+      b0 <- if (isTRUE(orthogonal)) {
+        ch <- try(chol(q_mat), silent = TRUE)
+        if (inherits(ch, "try-error")) ch <- chol(q_mat + diag(1e-6, d))
+        t(ch)
+      } else {
+        sweep(q_mat, 2L, sqrt(pmax(diag(q_mat), 1e-8)), "/")
+      }
+      for (h in 0:horizon) {
+        irf_arr[si, , , h + 1L] <- expm_r(a_mat * h) %*% b0
+      }
+    }
+    alpha <- (1 - prob) / 2
+    rows <- list()
+    for (imp in seq_len(d)) {
+      for (resp in seq_len(d)) {
+        for (h in 0:horizon) {
+          vals <- irf_arr[, resp, imp, h + 1L]
+          q <- stats::quantile(vals, probs = c(alpha, 0.5, 1 - alpha), names = FALSE)
+          rows[[length(rows) + 1L]] <- data.frame(
+            impulse = vars[imp], response = vars[resp], horizon = h,
+            mean = mean(vals), sd = stats::sd(vals),
+            q_lower = q[1L], q50 = q[2L], q_upper = q[3L],
+            stringsAsFactors = FALSE
+          )
+        }
+      }
+    }
+    out <- list(data = do.call(rbind, rows), variables = vars, horizon = horizon,
+                orthogonal = isTRUE(orthogonal), prob = prob)
+    class(out) <- c("DSEMirf", "list")
+    return(out)
+  }
+
+  has_latent <- any(terms$op == "=~" & terms$level == "within" & !(terms$lhs %in% shared_fac))
   if (has_latent) {
-    vars <- unique(terms$lhs[terms$op == "=~" & terms$level == "within"])
+    vars <- unique(terms$lhs[terms$op == "=~" & terms$level == "within" & !(terms$lhs %in% shared_fac)])
     dyn_regs <- w_regs[w_regs$lhs %in% vars & w_regs$rhs %in% vars & w_regs$lag > 0L, , drop = FALSE]
   } else {
     vars <- unique(w_regs$lhs)

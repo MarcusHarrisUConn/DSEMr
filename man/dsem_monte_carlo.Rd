@@ -11,7 +11,9 @@ dsem_monte_carlo(
   seed = 20260813L,
   compute = dsem_compute(),
   fit_args = list(chains = 2L, iter = 1000L, warmup = 500L),
-  truth = NULL
+  truth = NULL,
+  convergence = c("basic", "strict"),
+  rhat_max = 1.05
 )
 }
 \arguments{
@@ -28,9 +30,21 @@ dsem_monte_carlo(
 \item{fit_args}{Named list passed to \code{\link[=dsem]{dsem()}}.}
 
 \item{truth}{Optional named vector of true parameter values.}
+
+\item{convergence}{Replication acceptance rule: \code{"basic"} (default) retains
+all completed replications and reports convergence rates; \code{"strict"}
+additionally requires every retained replication to pass strict MCMC
+convergence (\code{max(Rhat) < rhat_max}) and positive-definite estimated
+covariance matrices, summarizing only strictly converged replications when
+any succeed.}
+
+\item{rhat_max}{Maximum acceptable split-\eqn{\hat{R}} threshold used for
+convergence flags (default \code{1.05} for \code{"strict"}, \code{1.01} for \code{"basic"}
+legacy flag if omitted).}
 }
 \value{
-A \code{DSEMmontecarlo} list with replication estimates and summaries.
+A \code{DSEMmontecarlo} list with replication estimates, strict/basic
+convergence diagnostics, and parameter summaries.
 }
 \description{
 Run a reproducible DSEM Monte Carlo study

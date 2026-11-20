@@ -180,10 +180,10 @@ test_that("cross-classified DSEM handles CLUSTER = subject time, GROUPMEAN, time
 
   fit_cc <- dsem(m_cc, dat, chains = 2, iter = 260, warmup = 130, seed = 939)
   cf <- coef(fit_cc)
-  expect_true(all(c("mean_x", "lag1_y", "time_x_on_timet", "id_var_x", "time_var_x") %in% names(cf)))
+  expect_true(all(c("mean_sx", "lag1_y", "time_sx_on_timet", "id_var_sx", "time_var_sx") %in% names(cf)))
   expect_lt(abs(unname(cf["lag1_y"]) - 0.35), 0.18)
-  expect_lt(abs(unname(cf["mean_x"]) - 0.50), 0.18)
-  expect_gt(unname(cf["time_x_on_timet"]), 0.05)
+  expect_lt(abs(unname(cf["mean_sx"]) - 0.50), 0.18)
+  expect_gt(unname(cf["time_sx_on_timet"]), 0.05)
 
   te <- dsem_inspect(fit_cc, "time_effects")
   expect_equal(nrow(te), n_t)

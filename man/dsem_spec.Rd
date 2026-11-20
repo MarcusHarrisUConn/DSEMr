@@ -18,13 +18,16 @@ dsem_spec(
   level_type = c("auto", "single", "twolevel", "threelevel", "crossclassified"),
   random_slopes = NULL,
   random_logv = FALSE,
+  random_residual_cov = FALSE,
+  l2_ar = FALSE,
   residual_dynamics = FALSE,
+  continuous_time = FALSE,
   categorical = character(),
   censored = NULL,
   family = c("gaussian", "binary", "ordinal"),
   tinterval = NULL,
   centering = c("latent", "groupmean", "grandmean", "none"),
-  prior_mode = c("default", "mplus", "penalized"),
+  prior_mode = c("default", "diffuse", "mplus", "penalized"),
   chains = 4L,
   iter = 2000L,
   warmup = floor(iter/2),
@@ -72,8 +75,18 @@ randomly across clusters (default \code{TRUE} when multilevel).}
 \item{random_logv}{Logical; if \code{TRUE}, models a cluster-specific random log
 residual variance (\code{logv | y}).}
 
+\item{random_residual_cov}{Logical; if \code{TRUE} for multivariate two-level or
+three-level models, adds a cluster-varying shared residual covariance
+factor (\code{logvf | y1 ~~ y2}).}
+
+\item{l2_ar}{Logical; if \code{TRUE} in a three-level (\code{DSEM3}) model, adds a
+non-random Level-2 AR(1) autoregressive term across Level-2 units.}
+
 \item{residual_dynamics}{Logical; if \code{TRUE}, uses Residual DSEM (\code{RDSEM})
 autoregressive residuals.}
+
+\item{continuous_time}{Logical; if \code{TRUE}, specifies a continuous-time
+Ornstein-Uhlenbeck dynamic model (\code{CT-DSEM} / \code{CT-RDSEM}).}
 
 \item{categorical}{Optional character vector of binary/ordinal variable names.}
 
@@ -87,8 +100,8 @@ named list, passed to \code{\link[=dsem_model]{dsem_model()}}).}
 \item{centering}{Centering policy (\code{"latent"}, \code{"groupmean"}, \code{"grandmean"},
 or \code{"none"}).}
 
-\item{prior_mode}{Prior specification (\code{"default"}, \code{"mplus"} for diffuse
-priors, or \code{"penalized"} for Bayesian Lasso PSEM shrinkage).}
+\item{prior_mode}{Prior specification (\code{"default"}, \code{"diffuse"} — with legacy
+alias \code{"mplus"} — or \code{"penalized"} for Bayesian Lasso PSEM shrinkage).}
 
 \item{chains, iter, warmup, thin, seed}{Default MCMC sampler settings stored
 with the specification for reproducible script generation.}

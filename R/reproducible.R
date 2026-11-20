@@ -34,8 +34,15 @@
 #'   randomly across clusters (default `TRUE` when multilevel).
 #' @param random_logv Logical; if `TRUE`, models a cluster-specific random log
 #'   residual variance (`logv | y`).
+#' @param random_residual_cov Logical; if `TRUE` for multivariate two-level or
+#'   three-level models, adds a cluster-varying shared residual covariance
+#'   factor (`logvf | y1 ~~ y2`).
+#' @param l2_ar Logical; if `TRUE` in a three-level (`DSEM3`) model, adds a
+#'   non-random Level-2 AR(1) autoregressive term across Level-2 units.
 #' @param residual_dynamics Logical; if `TRUE`, uses Residual DSEM (`RDSEM`)
 #'   autoregressive residuals.
+#' @param continuous_time Logical; if `TRUE`, specifies a continuous-time
+#'   Ornstein-Uhlenbeck dynamic model (`CT-DSEM` / `CT-RDSEM`).
 #' @param categorical Optional character vector of binary/ordinal variable names.
 #' @param censored Optional Tobit censoring specification (character vector or
 #'   named list, passed to [dsem_model()]).
@@ -43,8 +50,8 @@
 #' @param tinterval Optional positive numeric `TINTERVAL` bin width.
 #' @param centering Centering policy (`"latent"`, `"groupmean"`, `"grandmean"`,
 #'   or `"none"`).
-#' @param prior_mode Prior specification (`"default"`, `"mplus"` for diffuse
-#'   priors, or `"penalized"` for Bayesian Lasso PSEM shrinkage).
+#' @param prior_mode Prior specification (`"default"`, `"diffuse"` — with legacy
+#'   alias `"mplus"` — or `"penalized"` for Bayesian Lasso PSEM shrinkage).
 #' @param chains,iter,warmup,thin,seed Default MCMC sampler settings stored
 #'   with the specification for reproducible script generation.
 #' @return A `DSEMspec` object.
@@ -77,13 +84,16 @@ dsem_spec <- function(outcomes,
                       level_type = c("auto", "single", "twolevel", "threelevel", "crossclassified"),
                       random_slopes = NULL,
                       random_logv = FALSE,
+                      random_residual_cov = FALSE,
+                      l2_ar = FALSE,
                       residual_dynamics = FALSE,
+                      continuous_time = FALSE,
                       categorical = character(),
                       censored = NULL,
                       family = c("gaussian", "binary", "ordinal"),
                       tinterval = NULL,
                       centering = c("latent", "groupmean", "grandmean", "none"),
-                      prior_mode = c("default", "mplus", "penalized"),
+                      prior_mode = c("default", "diffuse", "mplus", "penalized"),
                       chains = 4L,
                       iter = 2000L,
                       warmup = floor(iter / 2),
@@ -137,7 +147,10 @@ dsem_spec <- function(outcomes,
     level_type = level_type,
     random_slopes = random_slopes,
     random_logv = isTRUE(random_logv),
+    random_residual_cov = isTRUE(random_residual_cov),
+    l2_ar = isTRUE(l2_ar),
     residual_dynamics = isTRUE(residual_dynamics),
+    continuous_time = isTRUE(continuous_time),
     categorical = unique(as.character(categorical)),
     censored = .dsem_normalize_censored(censored),
     family = family,
@@ -178,7 +191,8 @@ as_dsem_model <- function(spec, syntax = c("lavaan", "mplus")) {
     categorical = if (length(spec$categorical)) spec$categorical else NULL,
     censored = if (length(spec$censored)) spec$censored else NULL,
     tinterval = spec$tinterval,
-    centering = spec$centering
+    centering = spec$centering,
+    continuous_time = isTRUE(spec$continuous_time)
   )
 }
 
@@ -309,6 +323,7 @@ dsem_code <- function(object,
     if (!identical(model$family, "gaussian")) sprintf('  family = "%s"', model$family) else NULL,
     if (length(model$categorical)) sprintf("  categorical = %s", fmt_chr_vec(model$categorical)) else NULL,
     if (!is.null(model$tinterval)) sprintf("  tinterval = %s", format(model$tinterval)) else NULL,
+    if (isTRUE(model$continuous_time)) "  continuous_time = TRUE" else NULL,
     if (!identical(model$centering, "latent")) sprintf('  centering = "%s"', model$centering) else NULL
   )
 
@@ -411,6 +426,10 @@ dsem_code <- function(object,
       re_names <- unique(c(re_names, lv_nm))
     }
   }
+  if (isTRUE(spec$random_residual_cov) && is_ml && length(spec$outcomes) >= 2L) {
+    lines <- c(lines, sprintf("  logvf | %s ~~ %s", spec$outcomes[1L], spec$outcomes[2L]))
+    re_names <- unique(c(re_names, "logvf"))
+  }
 
   if (spec$level_type == "twolevel") {
     lines <- c(lines, "level: 2")
@@ -426,9 +445,12 @@ dsem_code <- function(object,
     }
   } else if (spec$level_type == "threelevel") {
     lines <- c(lines, "level: 2")
+    if (isTRUE(spec$l2_ar)) {
+      for (out_nm in spec$outcomes) lines <- c(lines, sprintf("  %s ~ lag(%s, 1)", out_nm, out_nm))
+    }
     if (length(spec$predictors_between_l2)) {
       lines <- c(lines, sprintf("  %s ~ %s", spec$outcomes[1L], paste(spec$predictors_between_l2, collapse = " + ")))
-    } else {
+    } else if (!isTRUE(spec$l2_ar)) {
       lines <- c(lines, sprintf("  %s ~~ %s", spec$outcomes[1L], spec$outcomes[1L]))
     }
     lines <- c(lines, "level: 3")
@@ -570,6 +592,14 @@ dsem_code <- function(object,
       re_names <- unique(c(re_names, lv_nm))
     }
   }
+  if (isTRUE(spec$random_residual_cov) && is_ml && length(spec$outcomes) >= 2L) {
+    mod_lines <- c(
+      mod_lines,
+      sprintf("    f_rcov BY %s;", paste(paste0(spec$outcomes, "@1"), collapse = " ")),
+      "    logvf | f_rcov;"
+    )
+    re_names <- unique(c(re_names, "logvf"))
+  }
 
   if (spec$level_type == "twolevel") {
     mod_lines <- c(mod_lines, "  %BETWEEN%")
@@ -584,6 +614,9 @@ dsem_code <- function(object,
     }
   } else if (spec$level_type == "threelevel") {
     mod_lines <- c(mod_lines, sprintf("  %%BETWEEN %s%%", spec$id[1L]), sprintf("    %s;", paste(spec$outcomes, collapse = " ")))
+    if (isTRUE(spec$l2_ar)) {
+      for (out_nm in spec$outcomes) mod_lines <- c(mod_lines, sprintf("    %s ON %s&1;", out_nm, out_nm))
+    }
     if (length(spec$predictors_between_l2)) {
       mod_lines <- c(mod_lines, sprintf("    %s ON %s;", paste(spec$outcomes, collapse = " "), paste(spec$predictors_between_l2, collapse = " ")))
     }

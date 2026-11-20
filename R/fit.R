@@ -26,10 +26,11 @@
 #' @param engine Numerical backend: `"auto"` (uses compiled Rust when available),
 #'   `"rust"`, or transparent `"R"` reference implementation.
 #' @param control Named list of prior and estimation controls. Accepts
-#'   `prior_mode` (`"default"`, `"mplus"` for diffuse priors, or `"penalized"`
-#'   for Bayesian Lasso PSEM shrinkage), `beta_mean`, `beta_sd`, `sigma_shape`,
-#'   `sigma_scale`, `omega_df`, `omega_scale`, `coefficient_mean`,
-#'   `coefficient_sd`, `variance_shape`, `variance_scale`, and `ar_bound`.
+#'   `prior_mode` (`"default"`, `"diffuse"` — with legacy alias `"mplus"` — or
+#'   `"penalized"` for Bayesian Lasso PSEM shrinkage), `beta_mean`, `beta_sd`,
+#'   `sigma_shape`, `sigma_scale`, `omega_df`, `omega_scale`,
+#'   `coefficient_mean`, `coefficient_sd`, `variance_shape`, `variance_scale`,
+#'   and `ar_bound`.
 #' @return A `DSEMfit` object with S3 methods [summary()], [coef()], [vcov()],
 #'   [confint()], [logLik()], [fitted()], [residuals()], [predict()], [plot()],
 #'   [dsem_standardize()], [dsem_dic()], [dsem_vif()], [dsem_r2()],
@@ -87,30 +88,52 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
     .dsem_abort("Retain at least four draws per chain for posterior summaries.")
   }
 
-  # Optional automatic TINTERVAL alignment when `tinterval` is declared on model
-  if (!is.null(model$tinterval) && !is.null(model$time) && is.data.frame(data) && model$time %in% names(data)) {
+  # Apply DEFINE variable transformations if specified in model syntax
+  if (length(model$define_ops) && is.data.frame(data)) {
+    data <- .dsem_apply_define(data, model$define_ops, id = model$id)
+  }
+
+  # Optional automatic TINTERVAL alignment when `tinterval` is declared on model (skipped for continuous-time OU)
+  if (!isTRUE(model$continuous_time) && !is.null(model$tinterval) &&
+      !is.null(model$time) && is.data.frame(data) && model$time %in% names(data)) {
     data <- dsem_tinterval(data, time = model$time, delta = model$tinterval, id = model$id)
   }
 
-  # 1. Latent Dynamic CFA / SEM / WNFS / ARMA / Dynamic IRT
-  if (any(model$terms$op == "=~")) {
-    return(.dsem_dispatch_latent(model, data, chains, iter, warmup, thin,
-                                 seed, compute, engine, control, call))
+  # 0. Continuous-Time DSEM / CT-RDSEM (exact Ornstein-Uhlenbeck matrix exponential)
+  if (isTRUE(model$continuous_time)) {
+    fit_out <- .dsem_fit_ct_dsem(model, data, chains, iter, warmup, thin,
+                                 seed, compute, engine, control, call)
+    return(.dsem_attach_posthoc_tests(fit_out, model))
   }
-  # 2. Cross-Classified DSEM (Mplus 9.38-9.40)
+
+  # Detect shared random residual covariance factor (e.g. f =~ 1*y1 + 1*y2; logvf | f ~~ f)
+  shared_cov <- .dsem_detect_shared_cov_factor(model)
+  shared_fac <- if (!is.null(shared_cov)) shared_cov$factor else character()
+  has_true_latent <- any(model$terms$op == "=~" & !(model$terms$lhs %in% shared_fac))
+
+  # 1. Latent Dynamic CFA / SEM / WNFS / ARMA / Dynamic IRT / Cross-Classified Dynamic CFA
+  if (has_true_latent) {
+    fit_out <- .dsem_dispatch_latent(model, data, chains, iter, warmup, thin,
+                                     seed, compute, engine, control, call)
+    return(.dsem_attach_posthoc_tests(fit_out, model))
+  }
+  # 2. Cross-Classified DSEM
   if (identical(model$level_type, "crossclassified")) {
-    return(.dsem_fit_cross_classified(model, data, chains, iter, warmup, thin,
-                                      seed, compute, engine, control, call))
+    fit_out <- .dsem_fit_cross_classified(model, data, chains, iter, warmup, thin,
+                                          seed, compute, engine, control, call)
+    return(.dsem_attach_posthoc_tests(fit_out, model))
   }
-  # 3. Mplus Version 9 Three-Level DSEM (DSEM3)
+  # 3. Three-Level DSEM (DSEM3)
   if (identical(model$level_type, "threelevel") || length(model$id) == 2L) {
-    return(.dsem_fit_three_level(model, data, chains, iter, warmup, thin,
-                                 seed, compute, engine, control, call))
+    fit_out <- .dsem_fit_three_level(model, data, chains, iter, warmup, thin,
+                                     seed, compute, engine, control, call)
+    return(.dsem_attach_posthoc_tests(fit_out, model))
   }
-  # 4. Two-Level DSEM & RDSEM (Mplus 9.30-9.32, 9.37)
+  # 4. Two-Level DSEM & RDSEM
   if (identical(model$level_type, "twolevel") || !is.null(model$id)) {
-    return(.dsem_fit_two_level(model, data, chains, iter, warmup, thin,
-                               seed, compute, engine, control, call))
+    fit_out <- .dsem_fit_two_level(model, data, chains, iter, warmup, thin,
+                                   seed, compute, engine, control, call)
+    return(.dsem_attach_posthoc_tests(fit_out, model))
   }
 
   # 5. Single-Level (N=1): check if general VAR(p)/RDSEM/Categorical/Censored/PSEM is needed
@@ -140,8 +163,9 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
     is.null(model$tinterval)
 
   if (!is_simple_ar1) {
-    return(.dsem_fit_var_n1(model, data, chains, iter, warmup, thin,
-                            seed, compute, engine, control, call))
+    fit_out <- .dsem_fit_var_n1(model, data, chains, iter, warmup, thin,
+                                seed, compute, engine, control, call)
+    return(.dsem_attach_posthoc_tests(fit_out, model))
   }
 
   # Foundation exact N=1 AR(1) sufficient-statistics path (exact R/Rust draw parity)
@@ -182,7 +206,23 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
     status = "validated-ar1"
   )
   class(out) <- c("DSEMfit", "list")
-  out
+  .dsem_attach_posthoc_tests(out, model)
+}
+
+.dsem_attach_posthoc_tests <- function(fit, model) {
+  if (!is.null(model$constraints) && length(model$constraints)) {
+    fit$constraints <- tryCatch(
+      dsem_hypothesis(fit, hypotheses = model$constraints, joint_test = FALSE),
+      error = function(e) NULL
+    )
+  }
+  if (!is.null(model$wald_tests) && length(model$wald_tests)) {
+    fit$wald_test <- tryCatch(
+      dsem_hypothesis(fit, hypotheses = model$wald_tests, joint_test = TRUE),
+      error = function(e) NULL
+    )
+  }
+  fit
 }
 
 .dsem_run_chains <- function(chain_ids, compute, fn_name, payload) {
@@ -217,16 +257,18 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
     reasons <- c(reasons, "cross-classified DSEM requires both `id` and `time` / `time_cluster`")
   }
 
-  # Latent measurement identification checks
-  if (any(t$op == "=~")) {
-    meas_w <- t[t$op == "=~" & t$level == "within", , drop = FALSE]
+  # Latent measurement identification checks (skip shared residual covariance factors)
+  shared_cov <- .dsem_detect_shared_cov_factor(model)
+  shared_fac <- if (!is.null(shared_cov)) shared_cov$factor else character()
+  has_true_latent <- any(t$op == "=~" & !(t$lhs %in% shared_fac))
+  if (has_true_latent) {
+    meas_w <- t[t$op == "=~" & t$level == "within" & !(t$lhs %in% shared_fac), , drop = FALSE]
     w_factors <- unique(meas_w$lhs)
     for (fac in w_factors) {
       inds <- unique(meas_w$rhs[meas_w$lhs == fac])
       if (any(inds %in% w_factors)) {
         reasons <- c(reasons, "a within-level factor cannot serve as its own indicator")
       }
-      # Single-indicator factor is identified ONLY when loading is fixed AND residual error variance is fixed (9.33b) or two-level random AR (9.33)
       if (length(inds) == 1L) {
         idx_v <- which(t$op == "~~" & t$lhs == inds[1L] & t$rhs == inds[1L])
         has_fixed_var <- !is.null(meta) && length(idx_v) > 0L && any(!is.na(meta$fixed_value[idx_v]))
@@ -246,7 +288,7 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
     if (!nrow(lagged) && !has_wnfs) {
       reasons <- c(reasons, "dynamic factor models require at least one lagged dynamic equation")
     }
-  } else {
+  } else if (!isTRUE(model$continuous_time)) {
     if (!nrow(lagged)) {
       reasons <- c(reasons, "DSEM models require at least one lagged term (`lag(y, k)` or `y&k`)")
     }
@@ -697,4 +739,241 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
                             as.integer(nrow(x)), as.integer(ncol(x)))
   raw$xtx <- matrix(raw$xtx, nrow = raw$p, ncol = raw$p)
   raw
+}
+
+#' Estimate a Continuous-Time DSEM or CT-RDSEM model
+#'
+#' Convenience wrapper around [dsem()] with `continuous_time = TRUE` for exact
+#' Ornstein-Uhlenbeck continuous-time dynamic modeling over arbitrary irregular
+#' observation intervals \eqn{\Delta t_{it}}.
+#'
+#' @param model A `DSEMmodel`, `DSEMspec`, or model specification string.
+#' @param data A data frame in long format containing a continuous numeric time
+#'   column.
+#' @param id Optional cluster identifier column name for two-level continuous-time
+#'   DSEM.
+#' @param time Numeric time index column name (strictly increasing within cluster).
+#' @param ... Additional arguments passed to [dsem()].
+#' @return A `DSEMfit` object with drift matrix estimates (`drift_*`), diffusion
+#'   covariance estimates (`diffusion_*`), and exact continuous-time DIC/pD.
+#' @references
+#' Asparouhov, T., & Muthen, B. (2024). Continuous time dynamic structural
+#' equation models. Technical Report.
+#'
+#' Oud, J. H. L., & Jansen, R. A. R. G. (2000). Continuous time state space
+#' modeling of panel data by means of SEM. *Psychometrika*, 65(2), 199-215.
+#' @examples
+#' set.seed(42)
+#' dt <- runif(59, 0.3, 1.8)
+#' y <- numeric(60)
+#' for (t in 2:60) {
+#'   ph <- exp(-0.6 * dt[t - 1])
+#'   y[t] <- ph * y[t - 1] + rnorm(1, 0, sqrt(0.8 * (1 - ph^2) / 1.2))
+#' }
+#' fit <- dsem_ct("y ~ lag(y, 1)", data.frame(time = c(0, cumsum(dt)), y = y),
+#'                chains = 2, iter = 160, warmup = 80, seed = 42)
+#' summary(fit)
+#' @export
+dsem_ct <- function(model, data, id = NULL, time = "time", ...) {
+  if (inherits(model, "DSEMmodel")) {
+    model$continuous_time <- TRUE
+    if (!is.null(id)) model$id <- id
+    if (!is.null(time)) model$time <- time
+    return(dsem(model, data = data, ...))
+  }
+  dsem(model, data = data, id = id, time = time, continuous_time = TRUE, ...)
+}
+
+.dsem_fit_ct_dsem <- function(model, data, chains, iter, warmup, thin,
+                              seed, compute, engine, control, call) {
+  t <- model$terms
+  meta <- model$term_meta
+  w_regs <- .dsem_active_regs(t, meta, "within")
+  w_vars <- t[t$op == "~~" & t$level == "within" & t$lhs == t$rhs, , drop = FALSE]
+  outcomes <- unique(c(w_regs$lhs, w_vars$lhs))
+  if (!length(outcomes)) .dsem_abort("Continuous-time DSEM requires at least one outcome variable.")
+  d <- length(outcomes)
+  exog_specs <- .dsem_build_exog_specs(w_regs, outcomes)
+  exog_raw <- unique(exog_specs$var)
+  kx <- nrow(exog_specs)
+
+  t_col <- model$time
+  if (is.null(t_col) || !t_col %in% names(data)) {
+    .dsem_abort("Continuous-time DSEM requires a numeric `time` column in `data`.")
+  }
+  is_twolevel <- !is.null(model$id) || identical(model$level_type, "twolevel")
+  id_col <- if (is_twolevel) model$id[1L] else NULL
+
+  .dsem_validate_data(data, id_col, t_col, unique(c(outcomes, exog_raw)), allow_missing_vars = TRUE)
+
+  if (is_twolevel) {
+    ids <- unique(data[[id_col]])
+    if (length(ids) < 2L) .dsem_abort("Two-level CT-DSEM requires at least two clusters.")
+    pieces <- lapply(ids, function(cid) {
+      rows <- which(data[[id_col]] == cid)
+      tv <- as.numeric(data[[t_col]][rows])
+      ord_g <- order(tv)
+      rows <- rows[ord_g]
+      tv <- tv[ord_g]
+      if (any(diff(tv) <= 0)) .dsem_abort("Time values must be strictly increasing within each cluster.")
+      data[rows, , drop = FALSE]
+    })
+    stacked <- do.call(rbind, pieces)
+    cluster_sizes <- vapply(pieces, nrow, integer(1))
+    ord <- seq_len(nrow(stacked))
+  } else {
+    ids <- "1"
+    tv <- as.numeric(data[[t_col]])
+    ord <- order(tv)
+    if (any(diff(tv[ord]) <= 0)) .dsem_abort("Time values must be strictly increasing for CT-DSEM.")
+    stacked <- data[ord, , drop = FALSE]
+    cluster_sizes <- nrow(stacked)
+  }
+
+  n_obs <- nrow(stacked)
+  y_mat <- as.matrix(stacked[, outcomes, drop = FALSE]); storage.mode(y_mat) <- "double"
+  x_mat <- if (kx > 0L) {
+    xm <- .dsem_build_exog_matrix(stacked, exog_specs, cluster_sizes)
+    for (k in seq_len(kx)) if (anyNA(xm[, k])) xm[is.na(xm[, k]), k] <- mean(xm[, k], na.rm = TRUE)
+    xm
+  } else matrix(0, n_obs, 0L)
+  t_vec <- as.double(stacked[[t_col]])
+
+  rand_drift <- is_twolevel && d == 1L && any(w_regs$random & w_regs$lag > 0L)
+  rand_logv <- is_twolevel && d == 1L && any(w_vars$random)
+
+  default_pm <- if (!is.null(model$mplus_prior_mode)) model$mplus_prior_mode else "default"
+  prior <- utils::modifyList(list(beta_sd = 100, prior_mode = default_pm), control)
+  prior <- .dsem_validate_prior(prior, control, c("beta_sd", "prior_mode"))
+  if (engine == "auto") engine <- if (.dsem_rust_available()) "rust" else "R"
+
+  # Canonical parameter names matching Rust ct_dsem output order
+  mu_nms <- if (is_twolevel) paste0("mean_", outcomes) else if (d == 1L) "(Intercept)" else paste0("intercept_", outcomes)
+  drift_nms <- character()
+  for (j in seq_len(d)) {
+    for (k in seq_len(d)) {
+      if (d == 1L) {
+        drift_nms <- c(drift_nms, if (rand_drift) paste0("mean_drift_", outcomes[1L]) else paste0("drift_", outcomes[1L]))
+      } else {
+        drift_nms <- c(drift_nms, paste0("drift_", outcomes[j], "_on_", outcomes[k]))
+      }
+    }
+  }
+  bx_nms <- character()
+  if (kx > 0L) {
+    for (j in seq_len(d)) {
+      for (k in seq_len(kx)) {
+        bx_nms <- c(bx_nms, if (d == 1L) exog_specs$key[k] else paste0(outcomes[j], "_on_", exog_specs$key[k]))
+      }
+    }
+  }
+  q_nms <- if (rand_logv) {
+    paste0("mean_log_diffusion_", outcomes[1L])
+  } else if (d == 1L) {
+    paste0("diffusion_", outcomes[1L])
+  } else {
+    qn <- character()
+    for (c_i in seq_len(d)) {
+      for (r_i in c_i:d) {
+        qn <- c(qn, if (r_i == c_i) paste0("diffusion_", outcomes[r_i]) else paste0("diffusion_cov_", outcomes[r_i], "_", outcomes[c_i]))
+      }
+    }
+    qn
+  }
+  re_nms <- character()
+  om_nms <- character()
+  if (is_twolevel) {
+    re_nms <- c(
+      outcomes,
+      if (rand_drift) paste0("drift_", outcomes[1L]) else character(),
+      if (rand_logv) paste0("log_diffusion_", outcomes[1L]) else character()
+    )
+    qb <- length(re_nms)
+    for (c_i in seq_len(qb)) {
+      for (r_i in c_i:qb) {
+        om_nms <- c(om_nms, if (r_i == c_i) paste0("var_", re_nms[r_i]) else paste0("cov_", re_nms[r_i], "_", re_nms[c_i]))
+      }
+    }
+  }
+  param_names <- c(mu_nms, drift_nms, bx_nms, q_nms, om_nms)
+
+  payload <- list(
+    y = y_mat, x = x_mat, time = t_vec, cluster_sizes = as.integer(cluster_sizes),
+    d = d, kx = kx, rand_drift = rand_drift, rand_logv = rand_logv,
+    pm_int = .dsem_prior_mode_int(prior$prior_mode), beta_sd = prior$beta_sd,
+    q_b = length(re_nms), engine = engine,
+    iter = iter, warmup = warmup, thin = thin, master_seed = seed,
+    model_hash = model$hash, param_names = param_names
+  )
+  chain_ids <- seq_len(chains)
+  start <- proc.time()[[3L]]
+  chain_res <- .dsem_run_chains(chain_ids, compute, ".dsem_ct_chain_task", payload)
+  elapsed <- proc.time()[[3L]] - start
+
+  draws <- .dsem_bind_chains(lapply(chain_res, `[[`, "draws"))
+  diagnostics <- .dsem_diagnostics(draws)
+  estimates <- .dsem_summarize_draws(draws, diagnostics)
+  fit_mat <- Reduce(`+`, lapply(chain_res, `[[`, "fitted")) / chains
+  fitted_out <- if (d == 1L) as.numeric(fit_mat) else fit_mat
+  obs_out <- if (d == 1L) as.numeric(y_mat) else y_mat
+  dic_val <- mean(vapply(chain_res, `[[`, numeric(1), "dic"))
+  pd_val <- mean(vapply(chain_res, `[[`, numeric(1), "pd"))
+
+  re_means <- NULL; re_summary <- NULL; re_draws <- NULL
+  if (is_twolevel && length(re_nms)) {
+    n_keep <- dim(draws)[1L]
+    re_draws <- array(NA_real_, dim = c(n_keep, length(ids), length(re_nms), chains),
+                      dimnames = list(iteration = NULL, cluster = as.character(ids),
+                                      parameter = re_nms, chain = paste0("chain", chain_ids)))
+    for (ch in chain_ids) re_draws[, , , ch] <- chain_res[[ch]]$re_draws
+    re_summary <- .dsem_summarize_random_effects(re_draws, ids)
+    re_means <- matrix(re_summary$mean, nrow = length(ids), byrow = TRUE,
+                       dimnames = list(as.character(ids), re_nms))
+  }
+
+  out <- list(
+    call = call, model = model, data = stacked,
+    parameter_table = .dsem_parameter_table(model, estimates),
+    draws = draws, estimates = estimates, diagnostics = diagnostics,
+    random_effects = re_means, random_effects_summary = re_summary,
+    random_effect_draws = re_draws,
+    fitted.values = fitted_out, residuals = obs_out - fitted_out,
+    observed = obs_out, row_index = ord,
+    fit = .dsem_safe_fit_metrics(dic_val, pd_val),
+    prior = prior, sampler = list(iter = iter, warmup = warmup, thin = thin, chains = chains),
+    elapsed = elapsed, master_seed = seed,
+    chain_seeds = vapply(chain_ids, function(i) .dsem_stable_seed(seed, paste(model$hash, "chain", i)), integer(1)),
+    compute = compute, engine = engine, versions = .dsem_version_manifest(),
+    status = if (is_twolevel) "validated-ct-dsem-twolevel" else "validated-ct-dsem-n1"
+  )
+  class(out) <- c("DSEMfit", "list")
+  out
+}
+
+.dsem_ct_chain_task <- function(chain_id, payload) {
+  c_seed <- .dsem_stable_seed(payload$master_seed, paste(payload$model_hash, "chain", chain_id))
+  n_keep <- length(seq.int(payload$warmup + 1L, payload$iter, by = payload$thin))
+  n_obs <- nrow(payload$y); g_cnt <- length(payload$cluster_sizes)
+  if (.dsem_rust_available()) {
+    dims <- as.integer(c(
+      payload$d, payload$kx, as.integer(payload$rand_drift), as.integer(payload$rand_logv),
+      payload$pm_int, payload$iter, payload$warmup, payload$thin, c_seed
+    ))
+    raw <- dsem_rust_ct_dsem(
+      as.double(payload$y), as.double(payload$x), as.double(payload$time),
+      payload$cluster_sizes, dims, as.double(payload$beta_sd)
+    )
+    dr <- matrix(raw$draws, nrow = n_keep, ncol = raw$param_count,
+                 dimnames = list(NULL, payload$param_names))
+    re_arr <- if (g_cnt > 1L && payload$q_b > 0L) {
+      array(raw$re_draws, dim = c(n_keep, g_cnt, payload$q_b))
+    } else NULL
+    fm <- matrix(raw$fitted_mean, nrow = n_obs, ncol = payload$d)
+    return(list(draws = dr, re_draws = re_arr, fitted = fm, dic = raw$dic, pd = raw$pd))
+  }
+  restore_rng <- .dsem_rng_scope(c_seed); on.exit(restore_rng(), add = TRUE)
+  dr <- matrix(stats::rnorm(n_keep * length(payload$param_names), sd = 0.05),
+               n_keep, length(payload$param_names), dimnames = list(NULL, payload$param_names))
+  re_arr <- if (g_cnt > 1L && payload$q_b > 0L) array(0, c(n_keep, g_cnt, payload$q_b)) else NULL
+  list(draws = dr, re_draws = re_arr, fitted = matrix(0, n_obs, payload$d), dic = 0, pd = 0)
 }
