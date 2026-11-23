@@ -677,15 +677,14 @@ dsem <- function(model, data, syntax = c("auto", "lavaan", "mplus"),
                   dimnames = list(NULL, c(names, "sigma2")))
   keep_i <- 0L
   for (i in seq_len(iter)) {
-    inv_precision <- solve(sufficient$xtx / sigma2 + prior_precision)
-    post_mean <- as.numeric(inv_precision %*%
-      (sufficient$xty / sigma2 + prior_precision %*% prior_mean))
-    beta <- post_mean + as.numeric(t(chol(inv_precision)) %*% stats::rnorm(p))
+    prec <- sufficient$xtx / sigma2 + prior_precision
+    info <- sufficient$xty / sigma2 + as.numeric(prior_precision %*% prior_mean)
+    beta <- .dsem_rmvnorm_prec_R(prec, info)
     rss <- sufficient$yty - 2 * sum(beta * sufficient$xty) +
       as.numeric(crossprod(beta, sufficient$xtx %*% beta))
     shape <- prior$sigma_shape + sufficient$n / 2
     scale <- prior$sigma_scale + max(rss, 0) / 2
-    sigma2 <- 1 / stats::rgamma(1L, shape = shape, rate = scale)
+    sigma2 <- max(1 / stats::rgamma(1L, shape = shape, rate = max(scale, 1e-12)), 1e-10)
     if (i %in% keep_at) {
       keep_i <- keep_i + 1L
       draws[keep_i, ] <- c(beta, sigma2)

@@ -234,6 +234,16 @@ dsem_hypothesis <- function(object, ..., hypotheses = NULL, prob = 0.95,
   flat <- matrix(aperm(draws, c(1L, 3L, 2L)), nrow = n_tot, ncol = length(params))
   colnames(flat) <- params
   env <- list2env(as.data.frame(flat, check.names = FALSE), parent = baseenv())
+  # Expose short label aliases (e.g. `phi` -> `mean_phi` or `fixed_phi`) when unambiguous
+  for (pfx in c("mean_", "fixed_", "l3_mean_")) {
+    hits <- params[startsWith(params, pfx)]
+    for (h in hits) {
+      short_nm <- sub(paste0("^", pfx), "", h)
+      if (nzchar(short_nm) && !exists(short_nm, envir = env, inherits = FALSE)) {
+        assign(short_nm, flat[, h], envir = env)
+      }
+    }
+  }
   # Expose common math functions in a safe evaluation environment
   for (fn in c("exp", "log", "sqrt", "abs", "pnorm", "qnorm", "plogis", "qlogis")) {
     assign(fn, get(fn, envir = asNamespace(if (fn %in% c("pnorm", "qnorm", "plogis", "qlogis")) "stats" else "base")), envir = env)
@@ -276,6 +286,10 @@ dsem_hypothesis <- function(object, ..., hypotheses = NULL, prob = 0.95,
       else .dsem_abort("Expression `%s` did not evaluate to a numeric vector of length %d.", raw_e, n_tot)
     }
     eval_mat[, i] <- as.double(vals)
+    if (nzchar(nms[i]) && grepl("^[A-Za-z_.][A-Za-z0-9_.]*$", nms[i]) &&
+        !exists(nms[i], envir = env, inherits = FALSE)) {
+      assign(nms[i], as.double(vals), envir = env)
+    }
     q <- stats::quantile(vals, probs = c(alpha, 0.5, 1 - alpha), names = FALSE, na.rm = TRUE)
     p_gt <- mean(vals > 0, na.rm = TRUE)
     p_lt <- mean(vals < 0, na.rm = TRUE)

@@ -18,6 +18,7 @@ dsem_inspect <- function(object, what = c("model", "terms", "estimates", "draws"
                                           "time_effect_draws",
                                           "latent_states", "latent_draws",
                                           "prior", "sampler", "identification",
+                                          "constraints", "wald_test",
                                           "standardized", "r2", "vif", "partial_cor")) {
   what <- match.arg(what)
   if (inherits(object, "DSEMmodel")) {
@@ -72,6 +73,8 @@ summary.DSEMfit <- function(object, standardized = FALSE, r2 = FALSE,
     diagnostics = object$diagnostics,
     standardized = if (isTRUE(standardized)) dsem_standardize(object, "stdyx") else NULL,
     r2 = if (isTRUE(r2) || isTRUE(standardized)) dsem_r2(object) else NULL,
+    constraints = object$constraints,
+    wald_test = object$wald_test,
     engine = object$engine,
     elapsed = object$elapsed,
     status = object$status,
@@ -112,6 +115,15 @@ print.summary.DSEMfit <- function(x, digits = 3L, ...) {
     cat("\nBayesian R-Square:\n")
     print(x$r2, row.names = FALSE, digits = digits)
   }
+  if (!is.null(x$constraints) && !is.null(x$constraints$summary)) {
+    cat("\nDerived Parameters (MODEL CONSTRAINT):\n")
+    print(x$constraints$summary, row.names = FALSE, digits = digits)
+  }
+  if (!is.null(x$wald_test) && !is.null(x$wald_test$wald)) {
+    w <- x$wald_test$wald
+    cat(sprintf("\nJoint Bayesian Wald Test (MODEL TEST): chi2(%d) = %.3f, p = %.4g\n",
+                w$df, w$statistic, w$p_value))
+  }
   invisible(x)
 }
 
@@ -139,6 +151,12 @@ confint.DSEMfit <- function(object, parm, level = 0.95, ...) {
   params <- dimnames(object$draws)$parameter
   if (!missing(parm) && !is.null(parm)) {
     params <- if (is.numeric(parm)) params[parm] else intersect(parm, params)
+    params <- params[!is.na(params)]
+  }
+  if (!length(params)) {
+    empty <- matrix(numeric(0), nrow = 0L, ncol = 2L)
+    colnames(empty) <- paste0(format(100 * c(alpha, 1 - alpha), trim = TRUE, digits = 3), " %")
+    return(empty)
   }
   res <- t(vapply(params, function(nm) {
     vals <- as.numeric(object$draws[, nm, ])
@@ -168,10 +186,23 @@ predict.DSEMfit <- function(object, newdata = NULL, horizon = 0L, ...) {
   horizon <- .dsem_integer(horizon, "horizon", 0)
   if (is.null(newdata) && horizon == 0L) return(object$fitted.values)
   cf <- stats::coef(object)
-  ar_idx <- grep("^(lag1_|ar1_|mean_s|mean_lag1_|fixed_s|fixed_lag1_)", names(cf))
-  phi <- if (length(ar_idx)) cf[ar_idx[1L]] else 0
-  int_idx <- grep("^(\\(Intercept\\)|intercept_|mean_|fixed_)", names(cf))
-  mu <- if (length(int_idx)) cf[int_idx[1L]] else 0
+  regs <- object$model$terms[object$model$terms$op == "~" & object$model$terms$rhs != "1" & object$model$terms$level == "within", , drop = FALSE]
+  out_nm <- if (nrow(regs)) unique(regs$lhs)[1L] else ""
+  if (isTRUE(object$model$continuous_time)) {
+    dr_idx <- grep("^(drift_|mean_drift_|fixed_drift_)", names(cf))
+    phi <- if (length(dr_idx)) exp(cf[dr_idx[1L]]) else 0
+  } else {
+    ar_idx <- grep("^(lag1_|ar1_|mean_s|mean_lag1_|fixed_s|fixed_lag1_)", names(cf))
+    phi <- if (length(ar_idx)) cf[ar_idx[1L]] else 0
+  }
+  int_candidates <- c("(Intercept)", paste0("intercept_", out_nm), paste0("mean_", out_nm), paste0("l3_mean_", out_nm))
+  int_hit <- intersect(int_candidates, names(cf))
+  if (length(int_hit)) {
+    mu <- cf[int_hit[1L]]
+  } else {
+    int_idx <- grep("^(\\(Intercept\\)|intercept_)", names(cf))
+    mu <- if (length(int_idx)) cf[int_idx[1L]] else 0
+  }
 
   if (horizon > 0L) {
     last_y <- if (is.matrix(object$observed)) {

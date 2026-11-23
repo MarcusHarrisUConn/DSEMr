@@ -261,28 +261,30 @@
   df
 }
 
-.dsem_spd_solve <- function(a, b = NULL) {
+.dsem_spd_chol <- function(a) {
   p <- nrow(a)
   a <- 0.5 * (a + t(a))
-  for (jit in c(0, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2)) {
-    cand <- a + diag(jit, p)
+  sc <- max(1, max(abs(diag(a)), na.rm = TRUE))
+  for (jit in c(0, 1e-12, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2)) {
+    cand <- a + diag(jit * sc, p)
     ch <- try(chol(cand), silent = TRUE)
-    if (!inherits(ch, "try-error")) {
-      if (is.null(b)) return(chol2inv(ch))
-      return(backsolve(ch, forwardsolve(t(ch), b)))
-    }
+    if (!inherits(ch, "try-error")) return(ch)
   }
-  if (is.null(b)) diag(1, p) else rep(0, p)
+  diag(sqrt(sc), p)
+}
+
+.dsem_spd_solve <- function(a, b = NULL) {
+  ch <- .dsem_spd_chol(a)
+  if (is.null(b)) return(chol2inv(ch))
+  backsolve(ch, forwardsolve(t(ch), b))
 }
 
 .dsem_rmvnorm_prec_R <- function(precision, info) {
   p <- nrow(precision)
   if (p == 0L) return(numeric())
-  cov_m <- .dsem_spd_solve(precision)
-  mu <- as.numeric(cov_m %*% info)
-  ch <- try(chol(cov_m), silent = TRUE)
-  if (inherits(ch, "try-error")) ch <- chol(cov_m + diag(1e-6, p))
-  mu + as.numeric(t(ch) %*% stats::rnorm(p))
+  ch <- .dsem_spd_chol(precision)
+  mu <- backsolve(ch, forwardsolve(t(ch), info))
+  as.numeric(mu + backsolve(ch, stats::rnorm(p)))
 }
 
 .dsem_rinv_wishart_R <- function(df, scale_mat) {

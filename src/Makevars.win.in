@@ -13,7 +13,7 @@ CARGOTMP = $(CURDIR)/.cargo
 VENDOR_DIR = $(CURDIR)/vendor
 
 $(STATLIB):
-	export PATH="$(PATH):$(HOME)/.cargo/bin" && \
+	export PATH="$(PATH):$(HOME)/.cargo/bin:$(USERPROFILE)/.cargo/bin" && \
 		rustc --version && cargo --version
 	mkdir -p "$(TARGET_DIR)/libgcc_mock"
 	touch "$(TARGET_DIR)/libgcc_mock/libgcc_eh.a"
@@ -24,7 +24,7 @@ $(STATLIB):
 		cp ./rust/vendor-config.toml "$(CARGOTMP)/config.toml"; \
 	fi
 	export CARGO_HOME="$(CARGOTMP)" && \
-		export PATH="$(PATH):$(HOME)/.cargo/bin" && \
+		export PATH="$(PATH):$(HOME)/.cargo/bin:$(USERPROFILE)/.cargo/bin" && \
 		export LIBRARY_PATH="$(LIBRARY_PATH);$(CURDIR)/$(TARGET_DIR)/libgcc_mock" && \
 		RUSTFLAGS="$(RUSTFLAGS) --print=native-static-libs" cargo build @CRAN_FLAGS@ --target=$(TARGET) --lib @PROFILE@ --manifest-path=./rust/Cargo.toml --target-dir="$(TARGET_DIR)"
 	rm -Rf "$(CARGOTMP)"

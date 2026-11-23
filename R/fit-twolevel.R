@@ -431,18 +431,29 @@
   for (it in seq_len(payload$iter)) {
     om_inv <- .dsem_spd_solve(omega)
     mu_pop <- colMeans(theta)
+    rss <- 0
+    n_eff <- 0L
     for (g in seq_len(g_cnt)) {
       idx_g <- (offsets[g] + 2L):offsets[g + 1L]
       yg <- y1[idx_g]; ylag <- y1[idx_g - 1L] - theta[g, 1L]
-      theta[g, 1L] <- (sum(yg) / s2 + om_inv[1L, 1L] * mu_pop[1L]) / (length(yg) / s2 + om_inv[1L, 1L]) + stats::rnorm(1L, 0, sqrt(1 / (length(yg) / s2 + om_inv[1L, 1L])))
+      phi_g <- if (q >= 2L) theta[g, 2L] else 0
+      pr1 <- length(yg) / s2 + om_inv[1L, 1L]
+      theta[g, 1L] <- (sum(yg - phi_g * ylag) / s2 + om_inv[1L, 1L] * mu_pop[1L]) / pr1 +
+        stats::rnorm(1L, 0, sqrt(1 / pr1))
+      ylag <- y1[idx_g - 1L] - theta[g, 1L]
       if (q >= 2L) {
         pr2 <- sum(ylag^2) / s2 + om_inv[2L, 2L]
-        theta[g, 2L] <- (sum(ylag * (yg - theta[g, 1L])) / s2 + om_inv[2L, 2L] * mu_pop[2L]) / pr2 + stats::rnorm(1L, 0, sqrt(1 / pr2))
+        theta[g, 2L] <- (sum(ylag * (yg - theta[g, 1L])) / s2 + om_inv[2L, 2L] * mu_pop[2L]) / pr2 +
+          stats::rnorm(1L, 0, sqrt(1 / pr2))
+        phi_g <- theta[g, 2L]
       }
+      res_g <- yg - theta[g, 1L] - phi_g * ylag
+      rss <- rss + sum(res_g^2)
+      n_eff <- n_eff + length(res_g)
     }
     cent <- sweep(theta, 2L, mu_pop)
     omega <- .dsem_rinv_wishart_R(q + 2 + g_cnt, diag(0.05, q) + crossprod(cent))
-    s2 <- 1 / stats::rgamma(1L, 0.01 + 0.5 * n_obs, rate = 0.01 + 0.25 * n_obs * s2)
+    s2 <- max(1 / stats::rgamma(1L, 0.01 + 0.5 * n_eff, rate = max(0.01 + 0.5 * rss, 1e-12)), 1e-10)
     if (it %in% keep_at) {
       ki <- ki + 1L
       vals <- c(mu_pop, omega[lower.tri(omega, diag = TRUE)], s2)

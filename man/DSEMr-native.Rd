@@ -6,3 +6,4 @@
 \description{
 Register the DSEMr native library
 }
+\keyword{internal}

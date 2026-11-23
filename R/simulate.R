@@ -376,6 +376,10 @@ dsem_monte_carlo <- function(model, replications = 100L,
   estimates <- if (compute$backend == "psock" && compute$workers > 1L && replications > 1L) {
     cl <- parallel::makePSOCKcluster(min(compute$workers, replications))
     on.exit(parallel::stopCluster(cl), add = TRUE)
+    parallel::clusterCall(cl, function() {
+      if (!"package:DSEMr" %in% search()) attachNamespace("DSEMr")
+      NULL
+    })
     parallel::parLapply(cl, ids, run_one)
   } else {
     lapply(ids, run_one)

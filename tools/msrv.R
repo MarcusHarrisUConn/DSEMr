@@ -4,7 +4,11 @@ if (!grepl("cargo", requirements, ignore.case = TRUE) ||
     !grepl("rustc", requirements, ignore.case = TRUE)) {
   stop("DESCRIPTION must declare Cargo and rustc in SystemRequirements.")
 }
-Sys.setenv(PATH = paste(Sys.getenv("PATH"), file.path(Sys.getenv("HOME"), ".cargo", "bin"), sep = .Platform$path.sep))
+cargo_bins <- c(
+  file.path(Sys.getenv("HOME"), ".cargo", "bin"),
+  if (nzchar(Sys.getenv("USERPROFILE"))) file.path(Sys.getenv("USERPROFILE"), ".cargo", "bin")
+)
+Sys.setenv(PATH = paste(c(Sys.getenv("PATH"), unique(cargo_bins)), collapse = .Platform$path.sep))
 rustc <- Sys.which("rustc")
 cargo <- Sys.which("cargo")
 if (!nzchar(rustc) || !nzchar(cargo)) {

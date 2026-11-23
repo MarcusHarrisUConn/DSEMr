@@ -597,19 +597,17 @@
         lambda[j] <- 1
       } else {
         precision <- ztz / theta[j] + diag(1 / prior$coefficient_sd^2, 2L)
-        variance <- solve(precision)
-        mean <- variance %*% (zty / theta[j] +
-                                rep(prior$coefficient_mean / prior$coefficient_sd^2, 2L))
-        beta <- as.numeric(mean + t(chol(variance)) %*% stats::rnorm(2L))
+        info_j <- zty / theta[j] + rep(prior$coefficient_mean / prior$coefficient_sd^2, 2L)
+        beta <- .dsem_rmvnorm_prec_R(precision, info_j)
         nu[j] <- beta[1L]; lambda[j] <- beta[2L]
       }
       beta <- c(nu[j], lambda[j])
       residual_ss <- measurement_stats$yty[j] - 2 * sum(beta * zty) +
         as.numeric(crossprod(beta, ztz %*% beta))
-      theta[j] <- 1 / stats::rgamma(
+      theta[j] <- max(1 / stats::rgamma(
         1L, prior$variance_shape + n_observed / 2,
-        rate = prior$variance_scale + max(residual_ss, 0) / 2
-      )
+        rate = max(prior$variance_scale + max(residual_ss, 0) / 2, 1e-12)
+      ), 1e-10)
     }
     phi <- .dsem_sample_phi(eta, phi, psi, prior)
     state_posterior <- .dsem_state_variance_parameters(eta, phi, prior)

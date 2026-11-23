@@ -6,7 +6,7 @@
     GNU Fortran (GCC) 14.2.0
 * running under: macOS Tahoe 26.6.2
 * using session charset: UTF-8
-* current time: 2026-11-23 14:47:59 UTC
+* current time: 2026-11-23 16:13:00 UTC
 * using option ‘--as-cran’
 * checking for file ‘DSEMr/DESCRIPTION’ ... OK
 * this is package ‘DSEMr’ version ‘0.1.0’
@@ -23,7 +23,7 @@ New submission
 * checking for hidden files and directories ... OK
 * checking for portable file names ... OK
 * checking for sufficient/correct file permissions ... OK
-* checking whether package ‘DSEMr’ can be installed ... [19s/18s] OK
+* checking whether package ‘DSEMr’ can be installed ... [19s/19s] OK
 * used C compiler: ‘Apple clang version 21.0.0 (clang-2100.3.34.2)’
 * used SDK: ‘MacOSX27.0.sdk’
 * checking installed package size ... OK

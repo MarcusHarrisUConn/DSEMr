@@ -2,39 +2,29 @@ Package: DSEMr
 Title: Bayesian Dynamic Structural Equation Modeling
 Version: 0.1.0
 Authors@R: c(
-    person("Marcus", "Harris", role = c("aut", "cre"),
+    person("Marcus", "Harris", role = c("aut", "cre", "cph"),
            email = "marcus.harris.uconn@gmail.com"),
-    person("The extendr contributors", role = "ctb",
+    person("The extendr contributors", role = c("ctb", "cph"),
            comment = "Authors of vendored Rust crates; see inst/AUTHORS")
   )
 Description: Specifies, simulates, and estimates Bayesian dynamic structural
-    equation models for intensive longitudinal and time-series data using a
-    compiled 'Rust' numerical backend and an R reference engine. Models can be
-    expressed with an extension of 'lavaan' syntax or standard section-based
-    SEM scripts and compile to a unified intermediate representation. Supports
-    single-level vector autoregressive, residual dynamic (Asparouhov and
-    Muthen, 2020, <doi:10.1080/10705511.2019.1626733>), continuous-time
-    Ornstein-Uhlenbeck (Oud and Jansen, 2000), dynamic factor, white-noise
-    factor score, binary or ordinal probit, and Tobit censored models;
-    two-level location-scale, exact collapsed ARMA(1,1), and multivariate
-    dynamic models with latent variable centering, random slopes, random log
-    innovation variances, random residual covariances, correlated within-level
-    innovations, and between-level structural regressions (Asparouhov,
-    Hamaker, and Muthen, 2018, <doi:10.1080/10705511.2017.1406803>; McNeish
-    and Hamaker, 2020, <doi:10.1037/met0000250>); three-level dynamic
-    structural equation models with simultaneous two-level block Gibbs
-    sampling, Level-2 autoregression, and three-level latent decomposition;
-    cross-classified subject-by-time models and cross-classified dynamic
-    factor analysis with random factor loadings; time-interval grid alignment;
-    penalized shrinkage priors; cluster-averaged and cluster-specific
-    standardized estimates and Bayesian R-squared (Schuurman, Ferrer, de
-    Boer-Sonnenschein, and Hamaker, 2016, <doi:10.1037/met0000062>);
-    posterior partial correlations, derived parameter hypothesis and Wald
-    tests, discrete and continuous-time impulse response functions, cluster
-    random-effect rankings, covariate variance inflation factors, Bayesian DIC
-    model comparison, publication-ready APA tables, LaTeX model equations,
-    visual path diagrams, reproducible code generation, deterministic parallel
-    Monte Carlo simulation studies, and an optional interactive 'shiny' studio.
+    equation models (DSEM) for intensive longitudinal and time-series data using
+    an offline-vendored 'Rust' backend and an R reference engine. Models compile
+    from extended 'lavaan' formulas or section-based SEM scripts into a unified
+    intermediate representation supporting single-level autoregressive, residual
+    dynamic (Asparouhov and Muthen, 2020, <doi:10.1080/10705511.2019.1626733>),
+    continuous-time Ornstein-Uhlenbeck (Oud and Jansen, 2000,
+    <doi:10.1007/BF02294374>), dynamic factor, binary or ordinal probit, and
+    Tobit censored models; two-level location-scale, exact collapsed ARMA(1,1),
+    random residual covariance, and multivariate dynamic models (Asparouhov,
+    Hamaker, and Muthen, 2018, <doi:10.1080/10705511.2017.1406803>; McNeish and
+    Hamaker, 2020, <doi:10.1037/met0000250>); three-level and cross-classified
+    dynamic models; time-interval grid alignment; standardized estimates and
+    Bayesian R-squared (Schuurman, Ferrer, de Boer-Sonnenschein, and Hamaker,
+    2016, <doi:10.1037/met0000062>); posterior partial correlations, hypothesis
+    and Wald tests, impulse response functions, DIC model comparison, APA
+    tables, LaTeX equations, path diagrams, Monte Carlo studies, and an
+    optional 'shiny' studio.
 License: GPL (>= 3)
 URL: https://github.com/MarcusHarrisUConn/DSEMr
 BugReports: https://github.com/MarcusHarrisUConn/DSEMr/issues
@@ -60,8 +50,7 @@ Suggests:
     rmarkdown,
     shiny,
     spelling,
-    testthat (>= 3.0.0),
-    withr
+    testthat (>= 3.0.0)
 VignetteBuilder: knitr
 SystemRequirements: Cargo (Rust's package manager), rustc (>= 1.71.0)
 Config/rextendr/version: 0.5.0

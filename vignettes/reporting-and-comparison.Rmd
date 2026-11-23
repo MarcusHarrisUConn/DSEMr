@@ -41,6 +41,7 @@ dat <- simulate_dsem(
   n = 18, clusters = 10, intercept = 0.5, ar = 0.45, sigma = 0.7,
   random_sd = c(0.3, 0.08), seed = 2026
 )
+set.seed(2026)
 dat$w <- ave(dat$y, dat$id, FUN = function(z) stats::rnorm(1))
 
 # Model 1: Random intercept + random AR(1) slope

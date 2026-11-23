@@ -19,6 +19,7 @@
 #'   `nobs`, `n_params`, `log_lik`, `d_bar`, `pd`, `dic`, `delta_dic`,
 #'   `weight`, `max_rhat`, `min_ess`, `converged`, and `elapsed`.
 #' @examples
+#' set.seed(15)
 #' dat <- simulate_dsem(n = 80, ar = 0.5, sigma = 0.7, seed = 15)
 #' dat$x <- rnorm(80)
 #' fit1 <- dsem("y ~ lag(y, 1)", dat, chains = 2, iter = 200, warmup = 100, seed = 15)

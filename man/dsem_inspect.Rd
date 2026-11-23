@@ -10,8 +10,8 @@ dsem_inspect(
     "fit", "random_effects", "random_effects_summary", "random_effect_draws",
     "l2_random_effects", "l2_random_effects_summary", "l2_random_effect_draws",
     "time_effects", "time_effects_summary", "time_effect_draws", "latent_states",
-    "latent_draws", "prior", "sampler", "identification", "standardized", "r2", "vif",
-    "partial_cor")
+    "latent_draws", "prior", "sampler", "identification", "constraints", "wald_test",
+    "standardized", "r2", "vif", "partial_cor")
 )
 }
 \arguments{
