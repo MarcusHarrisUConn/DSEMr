@@ -22,17 +22,17 @@ pub struct CcDynamicCfaOutput {
 /// lam_{gj} ~ N(lam_{0j}, tau^2_{lam,j}), fixed or random AR(1) slope, and optional time-level effects.
 #[allow(clippy::too_many_arguments)]
 pub fn mcmc_cc_dynamic_cfa(
-    y_grid: &[f64],        // (n_id * n_time) x n_items, ordered by subject g, time t
+    y_grid: &[f64], // (n_id * n_time) x n_items, ordered by subject g, time t
     n_id: usize,
     n_time: usize,
     n_items: usize,
     random_loadings: bool, // true = Ex 9.40b (s1-sp | f BY y1-yp)
     has_f_subj: bool,      // true = subject-level factor fsubj / f
     has_f_time: bool,      // true = time-level factor ftime / f
-    has_time_int: bool,    // true = time-level indicator random intercepts v_{tj} (cross-classified)
-    random_ar: bool,       // true = subject-varying AR(1) slope s_g
-    psi_fixed_one: bool,   // true = f@1 (unit within factor innovation variance)
-    prior_mode: i32,       // 0 = weakly_informative, 1 = diffuse
+    has_time_int: bool, // true = time-level indicator random intercepts v_{tj} (cross-classified)
+    random_ar: bool,    // true = subject-varying AR(1) slope s_g
+    psi_fixed_one: bool, // true = f@1 (unit within factor innovation variance)
+    prior_mode: i32,    // 0 = weakly_informative, 1 = diffuse
     ar_bound: f64,
     store_latent: bool,
     iter: usize,
@@ -348,9 +348,7 @@ pub fn mcmc_cc_dynamic_cfa(
                     v_time[idx(t, j, n_time)] -= m_vt;
                 }
                 nu0[j] += m_vt;
-                let ss_vt: f64 = (0..n_time)
-                    .map(|t| v_time[idx(t, j, n_time)].powi(2))
-                    .sum();
+                let ss_vt: f64 = (0..n_time).map(|t| v_time[idx(t, j, n_time)].powi(2)).sum();
                 let (sh, sc) = if prior_mode == 1 {
                     ((0.5 * n_time as f64 - 1.0).max(0.5), 0.5 * ss_vt.max(1e-8))
                 } else {
@@ -360,8 +358,7 @@ pub fn mcmc_cc_dynamic_cfa(
             }
 
             // 4c. Update grand intercept nu0[j] via hierarchical centering (u_subj + nu0)
-            let m_u: f64 =
-                (0..n_id).map(|g| u_subj[idx(g, j, n_id)]).sum::<f64>() / n_id as f64;
+            let m_u: f64 = (0..n_id).map(|g| u_subj[idx(g, j, n_id)]).sum::<f64>() / n_id as f64;
             let pr_nu = n_id as f64 * inv_ts + p_pr;
             let old_nu = nu0[j];
             let new_nu = (n_id as f64 * inv_ts * (old_nu + m_u)) / pr_nu
@@ -370,9 +367,7 @@ pub fn mcmc_cc_dynamic_cfa(
             for g in 0..n_id {
                 u_subj[idx(g, j, n_id)] += old_nu - new_nu;
             }
-            let ss_u: f64 = (0..n_id)
-                .map(|g| u_subj[idx(g, j, n_id)].powi(2))
-                .sum();
+            let ss_u: f64 = (0..n_id).map(|g| u_subj[idx(g, j, n_id)].powi(2)).sum();
             let (sh, sc) = if prior_mode == 1 {
                 ((0.5 * n_id as f64 - 1.0).max(0.5), 0.5 * ss_u.max(1e-8))
             } else {
@@ -412,8 +407,8 @@ pub fn mcmc_cc_dynamic_cfa(
                 let mean_lg: f64 =
                     (0..n_id).map(|g| lam_g[idx(g, j, n_id)]).sum::<f64>() / n_id as f64;
                 let pr_l0 = n_id as f64 * inv_tl + p_pr;
-                lam0[j] = (n_id as f64 * inv_tl * mean_lg) / pr_l0
-                    + (1.0 / pr_l0).sqrt() * rng.rnorm();
+                lam0[j] =
+                    (n_id as f64 * inv_tl * mean_lg) / pr_l0 + (1.0 / pr_l0).sqrt() * rng.rnorm();
                 let ss_l: f64 = (0..n_id)
                     .map(|g| (lam_g[idx(g, j, n_id)] - lam0[j]).powi(2))
                     .sum();

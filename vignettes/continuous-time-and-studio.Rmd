@@ -1,0 +1,92 @@
+---
+title: "Continuous-time DSEM, advanced dynamics, and interactive studio"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Continuous-time DSEM, advanced dynamics, and interactive studio}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+Beyond discrete-time intensive longitudinal models, `DSEMr` provides native
+compiled Rust estimators for **Continuous-Time DSEM** (`dsem_ct()`), **random
+residual covariances** (`logvf`), exact collapsed **ARMA(1,1)** dynamics,
+**cross-classified dynamic factor models with random factor loadings**, and a
+guided 5-tab interactive Shiny studio (`run_dsemr()`).
+
+## Continuous-time DSEM for irregular observation intervals
+
+When intensive longitudinal assessments arrive at continuous, unequal elapsed
+intervals $\Delta t_{ik} = t_{ik} - t_{i,k-1} > 0$, `dsem_ct()` estimates the
+Ornstein-Uhlenbeck drift matrix $A$ and diffusion covariance $Q = G G^\top$
+directly via exact Padé `[6/6]` matrix exponentials $\exp(A \Delta t_{ik})$ and
+Kronecker continuous-time Lyapunov covariances (Oud & Jansen, 2000; Asparouhov
+& Muthen, 2024):
+
+```{r}
+library(DSEMr)
+
+set.seed(2026)
+dt <- runif(79, 0.25, 2.0)
+y <- numeric(80)
+y[1] <- rnorm(1, 0.5, 0.8)
+for (t in 2:80) {
+  ph <- exp(-0.65 * dt[t - 1])
+  v <- 0.80 * (1 - ph^2) / (2 * 0.65)
+  y[t] <- 0.5 + ph * (y[t - 1] - 0.5) + rnorm(1, 0, sqrt(v))
+}
+ct_dat <- data.frame(time = c(0, cumsum(dt)), y = y)
+
+fit_ct <- dsem_ct("y ~ lag(y, 1)", ct_dat, chains = 2, iter = 300, warmup = 150, seed = 42)
+summary(fit_ct)
+```
+
+Continuous-time impulse response curves follow $\exp(A h) B_0$ over continuous
+horizon $h$:
+
+```{r}
+irf_ct <- dsem_irf(fit_ct, horizon = 6)
+head(irf_ct$data)
+```
+
+## Random residual covariances and ARMA(1,1)
+
+In bivariate two-level DSEM, individual differences in contemporaneous residual
+co-fluctuation are modeled with a shared within-level shock factor (`logvf | y1 ~~ y2`
+in extended `lavaan` syntax or `f BY y1@1 y2@1; logvf | f;` in section-based
+syntax):
+
+```{r}
+sp_cov <- dsem_spec(
+  outcomes = c("y1", "y2"),
+  id = "subject",
+  time = "time",
+  level_type = "twolevel",
+  random_slopes = TRUE,
+  random_logv = TRUE,
+  random_residual_cov = TRUE
+)
+cat(dsem_to_lavaan(sp_cov))
+```
+
+Moving-average residual dynamics (`ARMA(1,1)`) are estimated with an exact
+$O(T)$ collapsed Toeplitz tridiagonal Cholesky sampler and a joint
+$(s, \theta, \log \sigma_e^2)$ ridge move, returning a scale-invariant marginal
+DIC.
+
+## Launching the interactive Shiny studio
+
+`DSEMr` ships with a 5-tab `bslib` interactive studio covering data exploration
+and `TINTERVAL` grid preview, guided and syntax-based model building with live
+SVG path diagrams and LaTeX equations, Rust-accelerated MCMC estimation and
+diagnostics, post-estimation analytics (`STDYX`, Bayesian $R^2$, partial
+correlations, hypothesis and Wald tests, IRFs, cluster rankings, DIC
+comparison), and Quarto/R reproducibility bundle downloads:
+
+```r
+# Requires optional suggested packages: shiny, bslib, ggplot2
+DSEMr::run_dsemr()
+```

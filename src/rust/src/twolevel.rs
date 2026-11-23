@@ -725,7 +725,8 @@ pub fn mcmc_twolevel(
                             let flat = j * n_slopes_per_out + n_lags * d + k_x;
                             if slope_re_idx[flat] < 0 {
                                 let xv = if latent_center_x[k_x] != 0 {
-                                    x_in[idx(st + t_loc, k_x, n_obs)] - x_between[idx(g, k_x, g_cnt)]
+                                    x_in[idx(st + t_loc, k_x, n_obs)]
+                                        - x_between[idx(g, k_x, g_cnt)]
                                 } else {
                                     x_in[idx(st + t_loc, k_x, n_obs)]
                                 };
@@ -741,7 +742,8 @@ pub fn mcmc_twolevel(
                         for (ei, &(_, out_j, k_x)) in exog_rand_slots.iter().enumerate() {
                             if out_j == j {
                                 let xv = if latent_center_x[k_x] != 0 {
-                                    x_in[idx(st + t_loc, k_x, n_obs)] - x_between[idx(g, k_x, g_cnt)]
+                                    x_in[idx(st + t_loc, k_x, n_obs)]
+                                        - x_between[idx(g, k_x, g_cnt)]
                                 } else {
                                     x_in[idx(st + t_loc, k_x, n_obs)]
                                 };
@@ -812,13 +814,15 @@ pub fn mcmc_twolevel(
                         let t_loc = r_loc + max_lag;
                         for j in 0..d {
                             b_rows[j].clear();
-                            let mut yd = y_work[idx(st + t_loc, j, n_obs)] - theta[idx(g, j, g_cnt)];
+                            let mut yd =
+                                y_work[idx(st + t_loc, j, n_obs)] - theta[idx(g, j, g_cnt)];
                             if has_random_logvf {
                                 yd -= cov_lam[j] * f_shock[st + t_loc];
                             }
                             for k_x in 0..kx {
                                 let xv = if latent_center_x[k_x] != 0 {
-                                    x_in[idx(st + t_loc, k_x, n_obs)] - x_between[idx(g, k_x, g_cnt)]
+                                    x_in[idx(st + t_loc, k_x, n_obs)]
+                                        - x_between[idx(g, k_x, g_cnt)]
                                 } else {
                                     x_in[idx(st + t_loc, k_x, n_obs)]
                                 };
@@ -838,7 +842,8 @@ pub fn mcmc_twolevel(
                                     }
                                 }
                             }
-                            for (bi, &(_, out_j, l_idx, m_col)) in ar_rand_slots.iter().enumerate() {
+                            for (bi, &(_, out_j, l_idx, m_col)) in ar_rand_slots.iter().enumerate()
+                            {
                                 if out_j == j {
                                     let yl = y_work[idx(st + t_loc - lags[l_idx], m_col, n_obs)];
                                     let reg_v = if latent_center_y {
@@ -928,8 +933,8 @@ pub fn mcmc_twolevel(
                                     } else {
                                         x_in[idx(st + t_loc, k_x, n_obs)]
                                     };
-                                    rem -=
-                                        slopes_g[idx(n_lags * d + k_x, j, n_slopes_per_out)] * x_val;
+                                    rem -= slopes_g[idx(n_lags * d + k_x, j, n_slopes_per_out)]
+                                        * x_val;
                                 }
                                 for (l_idx, &lag_v) in lags.iter().enumerate() {
                                     for m_col in 0..d {
@@ -981,18 +986,25 @@ pub fn mcmc_twolevel(
                         for j in 0..d {
                             let s2 = sig2_g[j].max(1e-6);
                             // Exact stationary initial observation contribution for short-T univariate AR(1) DSEM2 & RDSEM2 (Asparouhov 2026)
-                            if d == 1 && n_lags == 1 && ((latent_center_y && !residual_dynamics && kx == 0) || residual_dynamics) {
+                            if d == 1
+                                && n_lags == 1
+                                && ((latent_center_y && !residual_dynamics && kx == 0)
+                                    || residual_dynamics)
+                            {
                                 let phi = slopes_g[0].clamp(-0.98, 0.98);
                                 let w0 = (1.0 - phi * phi).max(0.02) / s2;
                                 let mut y0_adj = y_work[idx(st, 0, n_obs)];
                                 if residual_dynamics {
                                     for k_x in 0..kx {
                                         let x0 = if latent_center_x[k_x] != 0 {
-                                            x_in[idx(st, k_x, n_obs)] - x_between[idx(g, k_x, g_cnt)]
+                                            x_in[idx(st, k_x, n_obs)]
+                                                - x_between[idx(g, k_x, g_cnt)]
                                         } else {
                                             x_in[idx(st, k_x, n_obs)]
                                         };
-                                        y0_adj -= slopes_g[idx(n_lags * d + k_x, 0, n_slopes_per_out)] * x0;
+                                        y0_adj -= slopes_g
+                                            [idx(n_lags * d + k_x, 0, n_slopes_per_out)]
+                                            * x0;
                                     }
                                 }
                                 p_mu[0] += w0;
@@ -1012,15 +1024,16 @@ pub fn mcmc_twolevel(
                                     } else {
                                         x_in[idx(st + t_loc, k_x, n_obs)]
                                     };
-                                    rem -=
-                                        slopes_g[idx(n_lags * d + k_x, j, n_slopes_per_out)] * x_val;
+                                    rem -= slopes_g[idx(n_lags * d + k_x, j, n_slopes_per_out)]
+                                        * x_val;
                                 }
                                 if !residual_dynamics {
                                     for (l_idx, &lag_v) in lags.iter().enumerate() {
                                         for m_col in 0..d {
-                                            let phi =
-                                                slopes_g[idx(l_idx * d + m_col, j, n_slopes_per_out)];
-                                            let y_lag = y_work[idx(st + t_loc - lag_v, m_col, n_obs)];
+                                            let phi = slopes_g
+                                                [idx(l_idx * d + m_col, j, n_slopes_per_out)];
+                                            let y_lag =
+                                                y_work[idx(st + t_loc - lag_v, m_col, n_obs)];
                                             rem -= phi * y_lag;
                                             if latent_center_y {
                                                 if m_col == j {
@@ -1034,8 +1047,8 @@ pub fn mcmc_twolevel(
                                 } else {
                                     for (l_idx, &lag_v) in lags.iter().enumerate() {
                                         for m_col in 0..d {
-                                            let phi =
-                                                slopes_g[idx(l_idx * d + m_col, j, n_slopes_per_out)];
+                                            let phi = slopes_g
+                                                [idx(l_idx * d + m_col, j, n_slopes_per_out)];
                                             let mut u_lag =
                                                 y_work[idx(st + t_loc - lag_v, m_col, n_obs)];
                                             for k_x in 0..kx {
@@ -1198,7 +1211,10 @@ pub fn mcmc_twolevel(
                     let use_stat_mh = d == 1
                         && n_lags == 1
                         && slope_re_idx[0] >= 0
-                        && ((latent_center_y && !residual_dynamics && kx == 0 && n_rand_slopes == 1)
+                        && ((latent_center_y
+                            && !residual_dynamics
+                            && kx == 0
+                            && n_rand_slopes == 1)
                             || residual_dynamics);
                     if use_stat_mh {
                         // First commit any random exogenous slopes in RDSEM2, then MH-check the AR(1) slope
@@ -1225,7 +1241,8 @@ pub fn mcmc_twolevel(
                                             fixed_slopes[fixed_slope_idx[flat_k] as usize]
                                         };
                                         let x0 = if latent_center_x[k_x] != 0 {
-                                            x_in[idx(st, k_x, n_obs)] - x_between[idx(g, k_x, g_cnt)]
+                                            x_in[idx(st, k_x, n_obs)]
+                                                - x_between[idx(g, k_x, g_cnt)]
                                         } else {
                                             x_in[idx(st, k_x, n_obs)]
                                         };
@@ -1302,7 +1319,10 @@ pub fn mcmc_twolevel(
                         rss_j += err * err;
                     }
                     let mut n_cnt = n_eff_g as f64;
-                    if d == 1 && n_lags == 1 && ((latent_center_y && !residual_dynamics && kx == 0) || residual_dynamics) {
+                    if d == 1
+                        && n_lags == 1
+                        && ((latent_center_y && !residual_dynamics && kx == 0) || residual_dynamics)
+                    {
                         let phi = slopes_g[0].clamp(-0.98, 0.98);
                         let mut e0 = y_work[idx(st, 0, n_obs)] - mu_gj;
                         if residual_dynamics {
@@ -1746,8 +1766,7 @@ pub fn mcmc_twolevel(
                                     } else {
                                         x_in[idx(st, k_x, n_obs)]
                                     };
-                                    e0 -=
-                                        slopes_g[idx(n_lags * d + k_x, 0, n_slopes_per_out)] * x0;
+                                    e0 -= slopes_g[idx(n_lags * d + k_x, 0, n_slopes_per_out)] * x0;
                                 }
                             }
                             rss += (1.0 - phi * phi).max(0.02) * e0 * e0;
@@ -1937,13 +1956,12 @@ pub fn mcmc_twolevel(
                             for jj in 0..d {
                                 for s in 0..n_slopes_per_out {
                                     let fl = jj * n_slopes_per_out + s;
-                                    slopes_g[idx(s, jj, n_slopes_per_out)] = if slope_re_idx[fl]
-                                        >= 0
-                                    {
-                                        theta[idx(g, slope_re_idx[fl] as usize, g_cnt)]
-                                    } else {
-                                        fixed_slopes[fixed_slope_idx[fl] as usize]
-                                    };
+                                    slopes_g[idx(s, jj, n_slopes_per_out)] =
+                                        if slope_re_idx[fl] >= 0 {
+                                            theta[idx(g, slope_re_idx[fl] as usize, g_cnt)]
+                                        } else {
+                                            fixed_slopes[fixed_slope_idx[fl] as usize]
+                                        };
                                 }
                             }
                             let mu_gj = theta[idx(g, j, g_cnt)];
@@ -1990,7 +2008,8 @@ pub fn mcmc_twolevel(
                                 if residual_dynamics {
                                     for k_x in 0..kx {
                                         let x0 = if latent_center_x[k_x] != 0 {
-                                            x_in[idx(st, k_x, n_obs)] - x_between[idx(g, k_x, g_cnt)]
+                                            x_in[idx(st, k_x, n_obs)]
+                                                - x_between[idx(g, k_x, g_cnt)]
                                         } else {
                                             x_in[idx(st, k_x, n_obs)]
                                         };
@@ -2214,8 +2233,9 @@ pub fn mcmc_twolevel(
                 }
             }
             if n_pen > 0 {
-                psem_lambda2 =
-                    rng.rgamma(1.0 + n_pen as f64, 1.0 + 0.5 * sum_tau2).clamp(1e-3, 1e3);
+                psem_lambda2 = rng
+                    .rgamma(1.0 + n_pen as f64, 1.0 + 0.5 * sum_tau2)
+                    .clamp(1e-3, 1e3);
             }
         }
 

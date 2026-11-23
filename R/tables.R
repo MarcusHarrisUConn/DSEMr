@@ -362,14 +362,14 @@ dsem_table <- function(x,
 
 .dsem_classify_param <- function(p_name, level_type = "single") {
   if (grepl("^(loading_|between_loading_)", p_name)) return("Measurement Model (Factor Loadings)")
-  if (grepl("^(sigma2|within_cov_|residual_variance_|between_residual_variance_|factor_variance|factor_cov_)", p_name)) return("Within-Level Variances & Covariances")
+  if (grepl("^(sigma2|within_cov_|residual_variance_|between_residual_variance_|factor_variance|factor_cov_|diffusion_|var_e$)", p_name)) return("Within-Level Variances & Covariances")
   if (grepl("^(var_|cov_|l3_var_|l3_cov_|l2_var_|l2_cov_|id_var_|id_cov_|time_var_|time_cov_|between_var_|between_cov_|tau_)", p_name)) {
     return("Random-Effect Variances & Covariances")
   }
   if (grepl("^(\\(Intercept\\)|intercept_|mean_|fixed_|threshold_)", p_name)) {
     return("Means, Intercepts & Thresholds")
   }
-  if (level_type != "single" && grepl("_on_", p_name) && !grepl("_on_lag[0-9]+_", p_name)) {
+  if (level_type != "single" && grepl("_on_", p_name) && !grepl("_on_lag[0-9]+_", p_name) && !grepl("^drift_", p_name)) {
     return("Between-Level Regressions")
   }
   "Within-Level Dynamic & Structural Effects"
@@ -377,11 +377,13 @@ dsem_table <- function(x,
 
 .dsem_pretty_param_label <- function(p_name) {
   if (identical(p_name, "(Intercept)")) return("Intercept")
+  if (identical(p_name, "var_e")) return("Innovation Var(e)")
   s <- p_name
   s <- sub("^l3_var_", "L3 Var(", s)
   s <- sub("^l3_cov_", "L3 Cov(", s)
   s <- sub("^l2_var_", "L2 Var(", s)
   s <- sub("^l2_cov_", "L2 Cov(", s)
+  s <- sub("^l2_ar1_", "L2 AR(1) ", s)
   s <- sub("^between_var_", "Between Var(", s)
   s <- sub("^between_cov_", "Between Cov(", s)
   s <- sub("^within_cov_", "Within Cov(", s)
@@ -392,6 +394,9 @@ dsem_table <- function(x,
   s <- sub("^var_", "Var(", s)
   s <- sub("^cov_", "Cov(", s)
   if (grepl("\\($", sub("[^()]+$", "", s)) && !grepl("\\)$", s)) s <- paste0(s, ")")
+  s <- sub("^drift_", "Drift ", s)
+  s <- sub("^diffusion_cov_", "Diffusion Cov ", s)
+  s <- sub("^diffusion_", "Diffusion ", s)
   s <- sub("^fixed_", "Fixed ", s)
   s <- sub("^mean_", "Mean ", s)
   s <- sub("^intercept_", "Intercept ", s)

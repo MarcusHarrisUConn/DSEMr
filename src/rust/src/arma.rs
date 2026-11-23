@@ -60,11 +60,7 @@ pub fn mcmc_arma11(
             any_miss = true;
         }
     }
-    let y_gm = if y_cnt > 0 {
-        y_sum / y_cnt as f64
-    } else {
-        0.0
-    };
+    let y_gm = if y_cnt > 0 { y_sum / y_cnt as f64 } else { 0.0 };
     for r in 0..n_obs {
         if miss_y[r] {
             y_work[r] = y_gm;
@@ -506,58 +502,64 @@ pub fn mcmc_arma11(
             // Shifts (s_pop -> s_pop + d, s_g -> s_g + d, theta_ma -> theta_ma - d, log(sigma2_e) -> log(sigma2_e) + eps).
             // Since (s_g' - s_pop') == (s_g - s_pop), the between-level hierarchical prior N(mu_pop, s_pop, Omega_B)
             // is 100% invariant and the translation Jacobian is 1!
-            let eval_joint_lp =
-                |th_v: f64, lse: f64, sp: f64, sg_slice: &[f64], l_b: &mut [f64], m_b: &mut [f64]| -> f64 {
-                    let se2 = lse.exp();
-                    let a = (1.0 + th_v * th_v) * se2 + theta_y;
-                    let b = th_v * se2;
-                    let max_n = max_t.saturating_sub(1);
-                    factor_toeplitz_tridiag(a, b, max_n, l_b, m_b);
-                    let mut logdet_prefix = vec![0.0; max_n + 1];
-                    for i in 0..max_n {
-                        logdet_prefix[i + 1] = logdet_prefix[i] + 2.0 * l_b[i].ln();
+            let eval_joint_lp = |th_v: f64,
+                                 lse: f64,
+                                 sp: f64,
+                                 sg_slice: &[f64],
+                                 l_b: &mut [f64],
+                                 m_b: &mut [f64]|
+             -> f64 {
+                let se2 = lse.exp();
+                let a = (1.0 + th_v * th_v) * se2 + theta_y;
+                let b = th_v * se2;
+                let max_n = max_t.saturating_sub(1);
+                factor_toeplitz_tridiag(a, b, max_n, l_b, m_b);
+                let mut logdet_prefix = vec![0.0; max_n + 1];
+                for i in 0..max_n {
+                    logdet_prefix[i + 1] = logdet_prefix[i] + 2.0 * l_b[i].ln();
+                }
+                let mut ll = 0.0;
+                let log2pi = (2.0 * PI).ln();
+                for g in 0..g_cnt {
+                    let st = offsets[g];
+                    let tg = offsets[g + 1] - st;
+                    if tg < 2 {
+                        continue;
                     }
-                    let mut ll = 0.0;
-                    let log2pi = (2.0 * PI).ln();
-                    for g in 0..g_cnt {
-                        let st = offsets[g];
-                        let tg = offsets[g + 1] - st;
-                        if tg < 2 {
-                            continue;
-                        }
-                        let n = tg - 1;
-                        let mug = mu_g[g];
-                        let sg = if is_twolevel && random_ar {
-                            sg_slice[g]
+                    let n = tg - 1;
+                    let mug = mu_g[g];
+                    let sg = if is_twolevel && random_ar {
+                        sg_slice[g]
+                    } else {
+                        sp
+                    };
+                    let mut quad = 0.0;
+                    let mut u_prev = 0.0;
+                    for i in 0..n {
+                        let zi = (y_work[st + i + 1] - mug) - sg * (y_work[st + i] - mug);
+                        let ui = if i == 0 {
+                            zi / l_b[0]
                         } else {
-                            sp
+                            (zi - m_b[i] * u_prev) / l_b[i]
                         };
-                        let mut quad = 0.0;
-                        let mut u_prev = 0.0;
-                        for i in 0..n {
-                            let zi = (y_work[st + i + 1] - mug) - sg * (y_work[st + i] - mug);
-                            let ui = if i == 0 {
-                                zi / l_b[0]
-                            } else {
-                                (zi - m_b[i] * u_prev) / l_b[i]
-                            };
-                            quad += ui * ui;
-                            u_prev = ui;
-                        }
-                        ll += -0.5 * (n as f64 * log2pi + logdet_prefix[n] + quad);
+                        quad += ui * ui;
+                        u_prev = ui;
                     }
-                    let lp_prior = -0.5 * p_pr * (th_v * th_v + sp * sp)
-                        + if prior_mode == 1 {
-                            lse
-                        } else {
-                            -0.01 * lse - 0.01 / se2
-                        };
-                    ll + lp_prior
-                };
+                    ll += -0.5 * (n as f64 * log2pi + logdet_prefix[n] + quad);
+                }
+                let lp_prior = -0.5 * p_pr * (th_v * th_v + sp * sp)
+                    + if prior_mode == 1 {
+                        lse
+                    } else {
+                        -0.01 * lse - 0.01 / se2
+                    };
+                ll + lp_prior
+            };
             let mut cur_sp = s_pop;
             let mut cur_th_j = theta_ma;
             let mut cur_lse_j = sigma2_e.max(1e-6).ln();
-            let mut cur_jlp = eval_joint_lp(cur_th_j, cur_lse_j, cur_sp, &s_g, &mut l_tmp, &mut m_tmp);
+            let mut cur_jlp =
+                eval_joint_lp(cur_th_j, cur_lse_j, cur_sp, &s_g, &mut l_tmp, &mut m_tmp);
             let mut prop_sg = s_g.clone();
             for mv in 0..4 {
                 let sd_d = if mv < 2 { 0.035 } else { 0.015 };
@@ -703,7 +705,9 @@ pub fn mcmc_arma11(
                     let fv = if t_loc == 0 {
                         mug + e_buf[0]
                     } else {
-                        mug + sg * (y_work[r - 1] - mug) + e_buf[t_loc] + theta_ma * e_buf[t_loc - 1]
+                        mug + sg * (y_work[r - 1] - mug)
+                            + e_buf[t_loc]
+                            + theta_ma * e_buf[t_loc - 1]
                     };
                     fitted_accum[r] += fv;
                 }

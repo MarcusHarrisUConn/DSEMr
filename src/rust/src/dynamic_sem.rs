@@ -332,7 +332,11 @@ pub fn mcmc_dynamic_sem(
                     let w = 0.025 * rng.rnorm();
                     (cur_lth + z + w, cur_lps - z + w, 0.0)
                 } else {
-                    (cur_lth + 0.05 * rng.rnorm(), cur_lps + 0.05 * rng.rnorm(), 0.0)
+                    (
+                        cur_lth + 0.05 * rng.rnorm(),
+                        cur_lps + 0.05 * rng.rnorm(),
+                        0.0,
+                    )
                 };
                 let prop_sp = cur_sp + delta_s;
                 if prop_lth <= -8.0
@@ -984,7 +988,8 @@ pub fn mcmc_dynamic_sem(
                         let mut info_tot = 0.0;
                         for q_o in 0..q_b {
                             if q_o != q_lv {
-                                info_tot -= om_b_inv[idx(q_lv, q_o, q_b)] * re_b[idx(g, q_o, g_cnt)];
+                                info_tot -=
+                                    om_b_inv[idx(q_lv, q_o, q_b)] * re_b[idx(g, q_o, g_cnt)];
                             }
                         }
                         let m_prior = (info_tot / p_tot).clamp(-8.0, 8.0);
@@ -1043,7 +1048,8 @@ pub fn mcmc_dynamic_sem(
                 }
                 let pr_m = g_cnt as f64 * o_qq + p_pr;
                 let old_m = phi_pop[idx(r, c, m)];
-                let delta_m = (sum_adj * o_qq - p_pr * old_m) / pr_m + (1.0 / pr_m).sqrt() * rng.rnorm();
+                let delta_m =
+                    (sum_adj * o_qq - p_pr * old_m) / pr_m + (1.0 / pr_m).sqrt() * rng.rnorm();
                 let new_m = (old_m + delta_m).clamp(-ar_bound, ar_bound);
                 phi_pop[idx(r, c, m)] = new_m;
                 for g in 0..g_cnt {
@@ -1165,9 +1171,8 @@ pub fn mcmc_dynamic_sem(
                             continue;
                         }
                         let om_qq = om_b_inv_px[idx(q_lv, q_lv, q_b)];
-                        let log_acc = ll_diff
-                            - nu0_iw_b * delta
-                            - 0.5 * psi0_diag_b * (inv_a2 - 1.0) * om_qq;
+                        let log_acc =
+                            ll_diff - nu0_iw_b * delta - 0.5 * psi0_diag_b * (inv_a2 - 1.0) * om_qq;
                         if log_acc.is_finite() && (log_acc >= 0.0 || rng.runif().ln() < log_acc) {
                             for g in 0..g_cnt {
                                 u_v[g] *= a;

@@ -35,7 +35,7 @@ pub fn mcmc_threelevel(
     has_l2_re: &[i32],
     has_l3_re: &[i32],
     latent_center_x: &[i32],
-    l2_ar_mask: &[i32],      // length d: 1 if outcome j has non-random AR(1) at Level 2
+    l2_ar_mask: &[i32], // length d: 1 if outcome j has non-random AR(1) at Level 2
     re_l3_on_w3_mask: &[i32], // kw3 x q_l3: 1 if L3 random effect p regresses on w3[k]
     re_l2_on_w2_mask: &[i32], // kw2 x q_l2: 1 if L2 random effect p regresses on w2[k]
     shared_cov_loadings: &[f64], // length d: shared within residual covariance factor loadings (logvf)
@@ -88,8 +88,8 @@ pub fn mcmc_threelevel(
         slot_to_l3[q] = i as i32;
     }
 
-    let any_rand_logv = (0..d)
-        .any(|j| slot_to_l2[lin_sl_end + j] >= 0 || slot_to_l3[lin_sl_end + j] >= 0);
+    let any_rand_logv =
+        (0..d).any(|j| slot_to_l2[lin_sl_end + j] >= 0 || slot_to_l3[lin_sl_end + j] >= 0);
     let use_full_sigma_w = d > 1 && !any_rand_logv && !has_random_logvf;
     let l2_ar_active: Vec<usize> = (0..d)
         .filter(|&j| l2_ar_mask.get(j).copied().unwrap_or(0) != 0 && slot_to_l2[j] >= 0)
@@ -200,7 +200,8 @@ pub fn mcmc_threelevel(
     let n_om3 = q_l3 * (q_l3 + 1) / 2;
     let n_om2 = q_l2 * (q_l2 + 1) / 2;
     let n_sw_offdiag = if use_full_sigma_w { d * (d - 1) / 2 } else { 0 };
-    let n_params = q_tot + l2_ar_active.len() + n_w3_active + n_w2_active + n_om3 + n_om2 + n_sw_offdiag;
+    let n_params =
+        q_tot + l2_ar_active.len() + n_w3_active + n_w2_active + n_om3 + n_om2 + n_sw_offdiag;
 
     let keep_indices: Vec<usize> = ((warmup + 1)..=iter)
         .filter(|i| (i - warmup - 1) % thin == 0)
@@ -551,9 +552,8 @@ pub fn mcmc_threelevel(
                                 for &pa in l2_pos {
                                     u2_z[idx(c, pa, g2_cnt)] = 0.0;
                                 }
-                                let th_base = build_theta_gc(
-                                    c, &gamma0, &gamma_w3, &gamma_w2, &u3, &u2_z,
-                                );
+                                let th_base =
+                                    build_theta_gc(c, &gamma0, &gamma_w3, &gamma_w2, &u3, &u2_z);
                                 if use_stat_t0 {
                                     let s2 = th_base[lin_sl_end].clamp(-10.0, 10.0).exp().max(1e-6);
                                     let phi = th_base[d].clamp(-0.98, 0.98);
@@ -651,8 +651,11 @@ pub fn mcmc_threelevel(
                                         }
                                     } else {
                                         for j in 0..d {
-                                            let inv_s2 =
-                                                1.0 / th_base[lin_sl_end + j].clamp(-10.0, 10.0).exp().max(1e-6);
+                                            let inv_s2 = 1.0
+                                                / th_base[lin_sl_end + j]
+                                                    .clamp(-10.0, 10.0)
+                                                    .exp()
+                                                    .max(1e-6);
                                             let rj = y_rem_vec[j];
                                             for a in 0..n2 {
                                                 let gja = gr2[idx(j, a, d)];
@@ -687,8 +690,7 @@ pub fn mcmc_threelevel(
                             }
                             for p_o in 0..q_l3 {
                                 if !l3_pos.contains(&p_o) {
-                                    h0[a] -=
-                                        om3_inv[idx(pa, p_o, q_l3)] * u3[idx(g, p_o, g3_cnt)];
+                                    h0[a] -= om3_inv[idx(pa, p_o, q_l3)] * u3[idx(g, p_o, g3_cnt)];
                                 }
                             }
                         }
@@ -802,8 +804,11 @@ pub fn mcmc_threelevel(
                                     }
                                 } else {
                                     for j in 0..d {
-                                        let inv_s2 =
-                                            1.0 / th_base[lin_sl_end + j].clamp(-10.0, 10.0).exp().max(1e-6);
+                                        let inv_s2 = 1.0
+                                            / th_base[lin_sl_end + j]
+                                                .clamp(-10.0, 10.0)
+                                                .exp()
+                                                .max(1e-6);
                                         let rj = y_rem_vec[j];
                                         for a in 0..n3 {
                                             let gja = gr3[idx(j, a, d)];
@@ -1117,7 +1122,10 @@ pub fn mcmc_threelevel(
                             } else {
                                 for j in 0..d {
                                     let inv_s2 = 1.0
-                                        / th_base[lin_sl_end + j].clamp(-10.0, 10.0).exp().max(1e-6);
+                                        / th_base[lin_sl_end + j]
+                                            .clamp(-10.0, 10.0)
+                                            .exp()
+                                            .max(1e-6);
                                     let rj = y_rem_vec[j];
                                     for a in 0..n3 {
                                         let gja = gr3[idx(j, a, d)];
@@ -1126,12 +1134,10 @@ pub fn mcmc_threelevel(
                                         }
                                         h0[a] += gja * rj * inv_s2;
                                         for b in 0..n3 {
-                                            p00[idx(a, b, n3)] +=
-                                                gja * gr3[idx(j, b, d)] * inv_s2;
+                                            p00[idx(a, b, n3)] += gja * gr3[idx(j, b, d)] * inv_s2;
                                         }
                                         for b in 0..n2 {
-                                            p0c[idx(a, b, n3)] +=
-                                                gja * gr2[idx(j, b, d)] * inv_s2;
+                                            p0c[idx(a, b, n3)] += gja * gr2[idx(j, b, d)] * inv_s2;
                                         }
                                     }
                                     for a in 0..n2 {
@@ -1141,8 +1147,7 @@ pub fn mcmc_threelevel(
                                         }
                                         hc[a] += gja * rj * inv_s2;
                                         for b in 0..n2 {
-                                            pcc[idx(a, b, n2)] +=
-                                                gja * gr2[idx(j, b, d)] * inv_s2;
+                                            pcc[idx(a, b, n2)] += gja * gr2[idx(j, b, d)] * inv_s2;
                                         }
                                     }
                                 }
@@ -1203,7 +1208,10 @@ pub fn mcmc_threelevel(
                                 if slot_to_l3[q] >= 0 {
                                     let p3 = slot_to_l3[q] as usize;
                                     for k in 0..kw3 {
-                                        if re_l3_on_w3_mask.get(idx(k, p3, kw3)).copied().unwrap_or(1)
+                                        if re_l3_on_w3_mask
+                                            .get(idx(k, p3, kw3))
+                                            .copied()
+                                            .unwrap_or(1)
                                             != 0
                                         {
                                             tot +=
@@ -1222,8 +1230,7 @@ pub fn mcmc_threelevel(
                                     if re_l2_on_w2_mask.get(idx(k, pa, kw2)).copied().unwrap_or(1)
                                         != 0
                                     {
-                                        tot +=
-                                            gamma_w2[idx(k, q, kw2)] * w2_in[idx(c, k, g2_cnt)];
+                                        tot += gamma_w2[idx(k, q, kw2)] * w2_in[idx(c, k, g2_cnt)];
                                     }
                                 }
                                 if !tot.is_finite() || tot.abs() >= 0.98 {
@@ -1275,8 +1282,9 @@ pub fn mcmc_threelevel(
                                 continue;
                             }
                             let th_old = build_theta_gc(c, &gamma0, &gamma_w3, &gamma_w2, &u3, &u2);
-                            let th_new =
-                                build_theta_gc(c, &gamma0, &gamma_w3, &gamma_w2, &u3_cand, &u2_cand);
+                            let th_new = build_theta_gc(
+                                c, &gamma0, &gamma_w3, &gamma_w2, &u3_cand, &u2_cand,
+                            );
                             let phi_old = th_old[d].clamp(-0.98, 0.98);
                             let phi_new = th_new[d].clamp(-0.98, 0.98);
                             let s2 = th_old[lin_sl_end].clamp(-10.0, 10.0).exp().max(1e-6);
@@ -1436,8 +1444,7 @@ pub fn mcmc_threelevel(
                     };
                     for _ in 0..2 {
                         let prop_v = (u_mode + prop_sd * rng.rnorm()).clamp(-8.0, 8.0);
-                        let log_acc =
-                            (lp_fn(prop_v) - logq(prop_v)) - (lp_fn(cur_v) - logq(cur_v));
+                        let log_acc = (lp_fn(prop_v) - logq(prop_v)) - (lp_fn(cur_v) - logq(cur_v));
                         if rng.runif().ln() < log_acc {
                             cur_v = prop_v;
                         }
@@ -1573,8 +1580,7 @@ pub fn mcmc_threelevel(
                     };
                     for _ in 0..2 {
                         let prop_v = (u_mode + prop_sd * rng.rnorm()).clamp(-8.0, 8.0);
-                        let log_acc =
-                            (lp_fn(prop_v) - logq(prop_v)) - (lp_fn(cur_v) - logq(cur_v));
+                        let log_acc = (lp_fn(prop_v) - logq(prop_v)) - (lp_fn(cur_v) - logq(cur_v));
                         if rng.runif().ln() < log_acc {
                             cur_v = prop_v;
                         }
@@ -1596,7 +1602,12 @@ pub fn mcmc_threelevel(
                 let o_qq = om3_inv[idx(p_l3, p_l3, q_l3)].max(1e-8);
                 let mut active_k: Vec<usize> = Vec::new();
                 for k in 0..kw3 {
-                    if re_l3_on_w3_mask.get(idx(k, p_l3, kw3)).copied().unwrap_or(1) != 0 {
+                    if re_l3_on_w3_mask
+                        .get(idx(k, p_l3, kw3))
+                        .copied()
+                        .unwrap_or(1)
+                        != 0
+                    {
                         active_k.push(k);
                     }
                 }
@@ -1659,7 +1670,12 @@ pub fn mcmc_threelevel(
                 let o_qq = om2_inv[idx(p_l2, p_l2, q_l2)].max(1e-8);
                 let mut active_k: Vec<usize> = Vec::new();
                 for k in 0..kw2 {
-                    if re_l2_on_w2_mask.get(idx(k, p_l2, kw2)).copied().unwrap_or(1) != 0 {
+                    if re_l2_on_w2_mask
+                        .get(idx(k, p_l2, kw2))
+                        .copied()
+                        .unwrap_or(1)
+                        != 0
+                    {
                         active_k.push(k);
                     }
                 }
@@ -1989,7 +2005,12 @@ pub fn mcmc_threelevel(
                 let p_l2 = slot_to_l2[q] as usize;
                 let mut active_k: Vec<usize> = Vec::new();
                 for k in 0..kw2 {
-                    if re_l2_on_w2_mask.get(idx(k, p_l2, kw2)).copied().unwrap_or(1) != 0 {
+                    if re_l2_on_w2_mask
+                        .get(idx(k, p_l2, kw2))
+                        .copied()
+                        .unwrap_or(1)
+                        != 0
+                    {
                         active_k.push(k);
                     }
                 }

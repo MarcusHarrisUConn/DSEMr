@@ -13,25 +13,28 @@ Description: Specifies, simulates, and estimates Bayesian dynamic structural
     expressed with an extension of 'lavaan' syntax or standard section-based
     SEM scripts and compile to a unified intermediate representation. Supports
     single-level vector autoregressive, residual dynamic (Asparouhov and
-    Muthen, 2020, <doi:10.1080/10705511.2019.1626733>), dynamic factor,
-    white-noise factor score, binary or ordinal probit, and Tobit censored
-    models; two-level location-scale and multivariate dynamic models with
-    latent variable centering, random slopes, random log innovation variances,
-    correlated within-level innovations, and between-level structural
-    regressions (Asparouhov, Hamaker, and Muthen, 2018,
-    <doi:10.1080/10705511.2017.1406803>; McNeish and Hamaker, 2020,
-    <doi:10.1037/met0000250>); three-level dynamic structural equation models
-    with simultaneous two-level block Gibbs sampling and three-level latent
-    decomposition; cross-classified subject-by-time models with selective
-    subject and occasion random slopes; time-interval grid alignment; penalized
-    shrinkage priors; cluster-averaged and cluster-specific standardized
-    estimates and Bayesian R-squared (Schuurman, Ferrer, de Boer-Sonnenschein,
-    and Hamaker, 2016, <doi:10.1037/met0000062>); posterior partial
-    correlations, derived parameter hypothesis and Wald tests, impulse response
-    functions, cluster random-effect rankings, covariate variance inflation
-    factors, Bayesian DIC model comparison, publication-ready APA tables, LaTeX
-    model equations, visual path diagrams, reproducible code generation, and
-    deterministic parallel Monte Carlo simulation studies.
+    Muthen, 2020, <doi:10.1080/10705511.2019.1626733>), continuous-time
+    Ornstein-Uhlenbeck (Oud and Jansen, 2000), dynamic factor, white-noise
+    factor score, binary or ordinal probit, and Tobit censored models;
+    two-level location-scale, exact collapsed ARMA(1,1), and multivariate
+    dynamic models with latent variable centering, random slopes, random log
+    innovation variances, random residual covariances, correlated within-level
+    innovations, and between-level structural regressions (Asparouhov,
+    Hamaker, and Muthen, 2018, <doi:10.1080/10705511.2017.1406803>; McNeish
+    and Hamaker, 2020, <doi:10.1037/met0000250>); three-level dynamic
+    structural equation models with simultaneous two-level block Gibbs
+    sampling, Level-2 autoregression, and three-level latent decomposition;
+    cross-classified subject-by-time models and cross-classified dynamic
+    factor analysis with random factor loadings; time-interval grid alignment;
+    penalized shrinkage priors; cluster-averaged and cluster-specific
+    standardized estimates and Bayesian R-squared (Schuurman, Ferrer, de
+    Boer-Sonnenschein, and Hamaker, 2016, <doi:10.1037/met0000062>);
+    posterior partial correlations, derived parameter hypothesis and Wald
+    tests, discrete and continuous-time impulse response functions, cluster
+    random-effect rankings, covariate variance inflation factors, Bayesian DIC
+    model comparison, publication-ready APA tables, LaTeX model equations,
+    visual path diagrams, reproducible code generation, deterministic parallel
+    Monte Carlo simulation studies, and an optional interactive 'shiny' studio.
 License: GPL (>= 3)
 URL: https://github.com/MarcusHarrisUConn/DSEMr
 BugReports: https://github.com/MarcusHarrisUConn/DSEMr/issues

@@ -88,11 +88,52 @@ dsem_equations <- function(object,
 
   terms <- model$terms
   lvl_type <- model$level_type
-  has_latent <- any(terms$op == "=~")
+  shared_cov <- .dsem_detect_shared_cov_factor(model)
+  shared_fac <- if (!is.null(shared_cov)) shared_cov$factor else character()
+  has_latent <- any(terms$op == "=~" & !(terms$lhs %in% shared_fac))
   is_cat <- !identical(model$family, "gaussian") || length(model$categorical) > 0L
   eq_lines <- character()
 
-  if (has_latent) {
+  if (isTRUE(model$continuous_time)) {
+    w_regs <- terms[terms$op == "~" & terms$rhs != "1" & terms$level == "within", , drop = FALSE]
+    outcomes <- unique(w_regs$lhs)
+    if (!length(outcomes)) outcomes <- "y"
+    d <- length(outcomes)
+    if (lvl_type == "single") {
+      if (d == 1L) {
+        yn <- tex_var(outcomes[1L])
+        a_s <- lookup_coef(paste0("drift_", outcomes[1L]), paste0("a_{", yn, "}"))
+        q_s <- lookup_coef(paste0("diffusion_", outcomes[1L]), paste0("q_{", yn, "}"))
+        mu_s <- lookup_coef(c("(Intercept)", paste0("intercept_", outcomes[1L])), paste0("\\mu_{", yn, "}"))
+        eq_lines <- c(
+          "\\textbf{Continuous-Time Ornstein-Uhlenbeck SDE:}",
+          paste0("d(", yn, "(t) - ", mu_s, ") &= ", a_s, "(", yn, "(t) - ", mu_s, ")\\,dt + \\sqrt{", q_s, "}\\,dW(t)"),
+          paste0(yn, "(t_k) &= ", mu_s, " + \\exp(", a_s, "\\Delta t_k)(", yn, "(t_{k-1}) - ", mu_s, ") + \\zeta_k")
+        )
+      } else {
+        eq_lines <- c(
+          "\\textbf{Multivariate Continuous-Time DSEM:}",
+          "d(\\mathbf{y}(t) - \\boldsymbol{\\mu}) &= \\mathbf{A}(\\mathbf{y}(t) - \\boldsymbol{\\mu})\\,dt + \\mathbf{G}\\,d\\mathbf{W}(t)",
+          "\\mathbf{y}(t_k) &= \\boldsymbol{\\mu} + \\exp(\\mathbf{A}\\Delta t_k)(\\mathbf{y}(t_{k-1}) - \\boldsymbol{\\mu}) + \\boldsymbol{\\zeta}_k, \\quad \\boldsymbol{\\zeta}_k \\sim \\mathcal{N}(\\mathbf{0}, \\mathbf{Q}(\\Delta t_k))"
+        )
+      }
+    } else {
+      yn <- tex_var(outcomes[1L])
+      a_s <- lookup_coef(c(paste0("mean_drift_", outcomes[1L]), paste0("drift_", outcomes[1L])), "a_i")
+      q_s <- lookup_coef(paste0("diffusion_", outcomes[1L]), "q")
+      eq_lines <- c(
+        "\\textbf{Level 1 (Continuous-Time Within-Cluster SDE):}",
+        paste0(yn, "_{i}(t_k) &= \\mu_{", yn, ",i} + ", yn, "^{(w)}_i(t_k)"),
+        if (d == 1L) {
+          paste0("d", yn, "^{(w)}_i(t) &= ", a_s, " ", yn, "^{(w)}_i(t)\\,dt + \\sqrt{", q_s, "}\\,dW_i(t)")
+        } else {
+          "d\\mathbf{y}^{(w)}_i(t) &= \\mathbf{A}\\mathbf{y}^{(w)}_i(t)\\,dt + \\mathbf{G}\\,d\\mathbf{W}_i(t)"
+        },
+        "\\textbf{Level 2 (Between-Cluster):}",
+        paste0("\\mu_{", yn, ",i} &= ", lookup_coef(paste0("mean_", outcomes[1L]), paste0("\\gamma_{0,", yn, "}")), " + u_{", yn, ",i}, \\quad \\mathbf{u}_i \\sim \\mathcal{N}(\\mathbf{0}, \\boldsymbol{\\Omega}_B)")
+      )
+    }
+  } else if (has_latent) {
     # Dynamic CFA / SEM / WNFS / Dynamic IRT
     meas_w <- terms[terms$op == "=~" & terms$level == "within", , drop = FALSE]
     regs_w <- terms[terms$op == "~" & terms$rhs != "1" & terms$level == "within", , drop = FALSE]
@@ -227,7 +268,7 @@ dsem_equations <- function(object,
       eq_lines <- c(eq_lines, "\\boldsymbol{\\varepsilon}_t &\\sim \\mathcal{N}(\\mathbf{0}, \\boldsymbol{\\Sigma})")
     }
   } else if (lvl_type == "threelevel") {
-    # Mplus Version 9 Three-Level DSEM (DSEM3)
+    # Three-Level DSEM (DSEM3; Asparouhov & Muthen, 2026)
     w_regs <- terms[terms$op == "~" & terms$rhs != "1" & terms$level == "within", , drop = FALSE]
     b2_regs <- terms[terms$op == "~" & terms$rhs != "1" & terms$level == "between_2", , drop = FALSE]
     b3_regs <- terms[terms$op == "~" & terms$rhs != "1" & terms$level == "between_3", , drop = FALSE]
@@ -255,14 +296,25 @@ dsem_equations <- function(object,
 
     eq_lines <- c(eq_lines, "\\textbf{Level 2 (Nested Context / Day } d \\textbf{ within } i\\textbf{):}")
     mu_eq <- paste0("\\mu_{", tex_var(outcomes[1L]), ",di} &= \\mu_{", tex_var(outcomes[1L]), ",i}^{(3)}")
-    if (nrow(b2_regs)) {
-      for (k in seq_len(nrow(b2_regs))) {
-        w2 <- b2_regs$rhs[k]
-        b_s <- lookup_coef(paste0("l2_", b2_regs$lhs[k], "_on_", w2), paste0("\\gamma^{(2)}_{", tex_var(w2), "}"))
+    b2_ar <- b2_regs[b2_regs$lag > 0L, , drop = FALSE]
+    b2_ex <- b2_regs[b2_regs$lag == 0L, , drop = FALSE]
+    if (nrow(b2_ex)) {
+      for (k in seq_len(nrow(b2_ex))) {
+        w2 <- b2_ex$rhs[k]
+        b_s <- lookup_coef(paste0("l2_", b2_ex$lhs[k], "_on_", w2), paste0("\\gamma^{(2)}_{", tex_var(w2), "}"))
         mu_eq <- paste0(mu_eq, signed_term(b_s, paste0(tex_var(w2), "_{di}")))
       }
     }
-    eq_lines <- c(eq_lines, paste0(mu_eq, " + u^{(2)}_{di}, \\quad u^{(2)}_{di} \\sim \\mathcal{N}(0, \\boldsymbol{\\Omega}^{(2)})"))
+    if (nrow(b2_ar)) {
+      ph2 <- lookup_coef(paste0("l2_ar1_", outcomes[1L]), paste0("\\phi^{(2)}_{", tex_var(outcomes[1L]), "}"))
+      eq_lines <- c(
+        eq_lines,
+        paste0(mu_eq, " + u^{(2)}_{di}"),
+        paste0("u^{(2)}_{di} &= ", ph2, " u^{(2)}_{d-1,i} + \\xi^{(2)}_{di}, \\quad \\xi^{(2)}_{di} \\sim \\mathcal{N}(0, \\boldsymbol{\\Omega}^{(2)})")
+      )
+    } else {
+      eq_lines <- c(eq_lines, paste0(mu_eq, " + u^{(2)}_{di}, \\quad u^{(2)}_{di} \\sim \\mathcal{N}(0, \\boldsymbol{\\Omega}^{(2)})"))
+    }
 
     eq_lines <- c(eq_lines, "\\textbf{Level 3 (Cluster / Person } i\\textbf{):}")
     re_syms <- c(paste0("\\mu_{", tex_var(outcomes[1L]), ",i}^{(3)}"))
@@ -307,7 +359,7 @@ dsem_equations <- function(object,
       paste0("\\alpha_i &\\sim \\mathcal{N}(0, ", lookup_coef(paste0("id_var_", out_nm), "\\sigma^2_{\\text{id}}"), "), \\quad \\tau_t \\sim \\mathcal{N}(0, ", lookup_coef(paste0("time_var_", out_nm), "\\sigma^2_{\\text{time}}"), ")")
     )
   } else {
-    # Two-Level DSEM / Location-Scale / RDSEM (Mplus 9.30, 9.37, etc.)
+    # Two-Level DSEM / Location-Scale / RDSEM
     w_regs <- terms[terms$op == "~" & terms$rhs != "1" & terms$level == "within", , drop = FALSE]
     b_regs <- terms[terms$op == "~" & terms$rhs != "1" & terms$level == "between", , drop = FALSE]
     w_vars <- terms[terms$op == "~~" & terms$level == "within" & terms$lhs == terms$rhs, , drop = FALSE]

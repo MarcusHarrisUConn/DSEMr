@@ -97,7 +97,7 @@ pub fn mcmc_ct_dsem(
         drift_a[idx(j, j, d)] = -0.8;
     }
     let mut beta_x = vec![0.0_f64; d * kx]; // row j, col k -> idx(j, k, d)
-    // Parameterize diffusion Q = L_q L_q^T where diag(L_q) = exp(l_diag), lower-tri = l_off
+                                            // Parameterize diffusion Q = L_q L_q^T where diag(L_q) = exp(l_diag), lower-tri = l_off
     let mut lq_diag = vec![0.0_f64; d]; // log(L_jj)
     let mut lq_off = vec![0.0_f64; d * (d - 1) / 2];
 
@@ -286,12 +286,11 @@ pub fn mcmc_ct_dsem(
                         rhs += om_b_inv[idx(ca, ra, q_b)] * mu_pop[ra];
                     }
                     if let Some(ds) = drift_slot {
-                        rhs -= om_b_inv[idx(ca, ds, q_b)]
-                            * (theta_b[idx(g, ds, g_cnt)] - drift_a[0]);
+                        rhs -=
+                            om_b_inv[idx(ca, ds, q_b)] * (theta_b[idx(g, ds, g_cnt)] - drift_a[0]);
                     }
                     if let Some(ls) = logv_slot {
-                        rhs -= om_b_inv[idx(ca, ls, q_b)]
-                            * (theta_b[idx(g, ls, g_cnt)] - logq_pop);
+                        rhs -= om_b_inv[idx(ca, ls, q_b)] * (theta_b[idx(g, ls, g_cnt)] - logq_pop);
                     }
                     inf[ca] = rhs;
                 }
@@ -521,7 +520,8 @@ pub fn mcmc_ct_dsem(
                     for j in 0..d {
                         rem[j] = y_work[idx(r, j, n_obs)] - mu_g[j];
                         for m_c in 0..d {
-                            rem[j] -= phi[idx(j, m_c, d)] * (y_work[idx(r - 1, m_c, n_obs)] - mu_g[m_c]);
+                            rem[j] -=
+                                phi[idx(j, m_c, d)] * (y_work[idx(r - 1, m_c, n_obs)] - mu_g[m_c]);
                         }
                     }
                     // Design matrix H (d x n_bx): row j, col (m_c * kx + k) = delta_{j,m_c} x_t[k] - phi[j, m_c] x_{t-1}[k]
@@ -603,9 +603,19 @@ pub fn mcmc_ct_dsem(
                     }
                     -0.5 * qf
                 };
-                let mut cur_lp =
-                    ct_1d_cluster_loglik(&y_work, x_in, &dt_vec, st, tg, n_obs, kx, mug, &beta_x, cur_a, cur_lq.exp())
-                        + prior_lp(cur_a, cur_lq);
+                let mut cur_lp = ct_1d_cluster_loglik(
+                    &y_work,
+                    x_in,
+                    &dt_vec,
+                    st,
+                    tg,
+                    n_obs,
+                    kx,
+                    mug,
+                    &beta_x,
+                    cur_a,
+                    cur_lq.exp(),
+                ) + prior_lp(cur_a, cur_lq);
                 for _ in 0..2 {
                     let prop_a = if use_rand_drift {
                         cur_a + mh_scale_g * rng.rnorm()
@@ -802,7 +812,8 @@ pub fn mcmc_ct_dsem(
                     for v in &mut cand_a {
                         *v += mh_scale_a * rng.rnorm();
                     }
-                    let diag_ok = (0..d).all(|j| cand_a[idx(j, j, d)] < -1e-4 && cand_a[idx(j, j, d)] > -25.0);
+                    let diag_ok = (0..d)
+                        .all(|j| cand_a[idx(j, j, d)] < -1e-4 && cand_a[idx(j, j, d)] > -25.0);
                     let off_ok = cand_a.iter().all(|v| v.abs() < 20.0);
                     prop_a_cnt += 1;
                     if diag_ok && off_ok {
@@ -845,7 +856,8 @@ pub fn mcmc_ct_dsem(
                         }
                     }
                     let ld_ok = cand_ld.iter().all(|&v| v > -6.0 && v < 6.0);
-                    let a_ok = (0..d).all(|j| cand_a[idx(j, j, d)] < -1e-4 && cand_a[idx(j, j, d)] > -25.0);
+                    let a_ok = (0..d)
+                        .all(|j| cand_a[idx(j, j, d)] < -1e-4 && cand_a[idx(j, j, d)] > -25.0);
                     prop_q_cnt += 1;
                     if ld_ok && a_ok {
                         let cand_q = build_spd_from_chol(&cand_ld, &cand_lo, d);
@@ -856,11 +868,10 @@ pub fn mcmc_ct_dsem(
                             } else {
                                 0.0
                             };
-                            let acc = (prop_ll
-                                + prior_a(&cand_a)
-                                + prior_q_jac(&cand_ld, &cand_lo))
-                                - (cur_ll + prior_a(&drift_a) + prior_q_jac(&lq_diag, &lq_off))
-                                + jac_a;
+                            let acc =
+                                (prop_ll + prior_a(&cand_a) + prior_q_jac(&cand_ld, &cand_lo))
+                                    - (cur_ll + prior_a(&drift_a) + prior_q_jac(&lq_diag, &lq_off))
+                                    + jac_a;
                             if acc.is_finite() && (acc >= 0.0 || rng.runif().ln() < acc) {
                                 lq_diag = cand_ld;
                                 lq_off = cand_lo;
@@ -1026,7 +1037,8 @@ pub fn mcmc_ct_dsem(
                                 for kk in 0..kx {
                                     prev_m += beta_x[idx(k, kk, d)] * x_in[idx(r - 1, kk, n_obs)];
                                 }
-                                fv[j] += phi[idx(j, k, d)] * (y_work[idx(r - 1, k, n_obs)] - prev_m);
+                                fv[j] +=
+                                    phi[idx(j, k, d)] * (y_work[idx(r - 1, k, n_obs)] - prev_m);
                             }
                         }
                         ct_step_cov(&phi, &sig_inf, d)
@@ -1175,7 +1187,15 @@ pub fn mat_exp_scaled(a: &[f64], dt: f64, d: usize) -> Vec<f64> {
     }
 
     // [6/6] Pade coefficients b_k = (12-k)! 6! / (12! k! (6-k)!)
-    let b = [1.0, 0.5, 5.0 / 44.0, 1.0 / 66.0, 1.0 / 792.0, 1.0 / 15840.0, 1.0 / 665280.0];
+    let b = [
+        1.0,
+        0.5,
+        5.0 / 44.0,
+        1.0 / 66.0,
+        1.0 / 792.0,
+        1.0 / 15840.0,
+        1.0 / 665280.0,
+    ];
     let id = eye(d, 1.0);
     let m2 = mat_mul(&m, &m, d, d, d);
     let m4 = mat_mul(&m2, &m2, d, d, d);

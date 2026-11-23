@@ -19,14 +19,14 @@ pub struct CrossClassifiedOutput {
 /// subject random logv via Newton-Laplace Independence MH + PX scale move, and PSEM shrinkage).
 #[allow(clippy::too_many_arguments)]
 pub fn mcmc_crossclassified(
-    y_grid: &[f64],          // (n_id * n_time) x d, ordered by id g=0..n_id, t=0..n_time
-    x_grid: &[f64],          // (n_id * n_time) x kx
-    w_id: &[f64],            // n_id x kw_id
-    w_time: &[f64],          // n_time x kw_time
-    slope_rand_id: &[i32],   // d * n_sl
-    slope_rand_time: &[i32], // d * n_sl
-    has_random_logv: &[i32], // d
-    re_id_on_w_mask: &[i32], // kw_id x q_id
+    y_grid: &[f64],            // (n_id * n_time) x d, ordered by id g=0..n_id, t=0..n_time
+    x_grid: &[f64],            // (n_id * n_time) x kx
+    w_id: &[f64],              // n_id x kw_id
+    w_time: &[f64],            // n_time x kw_time
+    slope_rand_id: &[i32],     // d * n_sl
+    slope_rand_time: &[i32],   // d * n_sl
+    has_random_logv: &[i32],   // d
+    re_id_on_w_mask: &[i32],   // kw_id x q_id
     re_time_on_w_mask: &[i32], // kw_time x q_time
     n_id: usize,
     n_time: usize,
@@ -145,13 +145,18 @@ pub fn mcmc_crossclassified(
         .count();
     let n_wt_active: usize = (0..q_time)
         .flat_map(|q| (0..kw_time).map(move |k| (k, q)))
-        .filter(|&(k, q)| re_time_on_w_mask.get(idx(k, q, kw_time)).copied().unwrap_or(1) != 0)
+        .filter(|&(k, q)| {
+            re_time_on_w_mask
+                .get(idx(k, q, kw_time))
+                .copied()
+                .unwrap_or(1)
+                != 0
+        })
         .count();
 
     let n_om_id = q_id * (q_id + 1) / 2;
     let n_om_t = q_time * (q_time + 1) / 2;
-    let n_params =
-        q_id + n_wid_active + n_wt_active + n_fixed_sl + n_om_id + n_om_t + n_fixed_sig;
+    let n_params = q_id + n_wid_active + n_wt_active + n_fixed_sl + n_om_id + n_om_t + n_fixed_sig;
 
     let keep_indices: Vec<usize> = ((warmup + 1)..=iter)
         .filter(|i| (i - warmup - 1) % thin == 0)
@@ -207,7 +212,12 @@ pub fn mcmc_crossclassified(
             for q in 0..q_time {
                 let mut v = vt[idx(t, q, n_time)];
                 for k in 0..kw_time {
-                    if re_time_on_w_mask.get(idx(k, q, kw_time)).copied().unwrap_or(1) != 0 {
+                    if re_time_on_w_mask
+                        .get(idx(k, q, kw_time))
+                        .copied()
+                        .unwrap_or(1)
+                        != 0
+                    {
                         v += gwt[idx(k, q, kw_time)] * w_time[idx(t, k, n_time)];
                     }
                 }
@@ -501,8 +511,14 @@ pub fn mcmc_crossclassified(
                     } else {
                         let mut base_t = th_g[j];
                         for k in 0..kw_time {
-                            if re_time_on_w_mask.get(idx(k, j, kw_time)).copied().unwrap_or(1) != 0 {
-                                base_t += gamma_w_time[idx(k, j, kw_time)] * w_time[idx(t, k, n_time)];
+                            if re_time_on_w_mask
+                                .get(idx(k, j, kw_time))
+                                .copied()
+                                .unwrap_or(1)
+                                != 0
+                            {
+                                base_t +=
+                                    gamma_w_time[idx(k, j, kw_time)] * w_time[idx(t, k, n_time)];
                             }
                         }
                         let r = y_work[idx(st + t, j, n_obs)] - base_t;
@@ -798,7 +814,12 @@ pub fn mcmc_crossclassified(
             for q in 0..q_time {
                 let mut active_k: Vec<usize> = Vec::new();
                 for k in 0..kw_time {
-                    if re_time_on_w_mask.get(idx(k, q, kw_time)).copied().unwrap_or(1) != 0 {
+                    if re_time_on_w_mask
+                        .get(idx(k, q, kw_time))
+                        .copied()
+                        .unwrap_or(1)
+                        != 0
+                    {
                         active_k.push(k);
                     }
                 }
@@ -889,10 +910,16 @@ pub fn mcmc_crossclassified(
             }
             for q in 0..q_time {
                 for k in 0..kw_time {
-                    if re_time_on_w_mask.get(idx(k, q, kw_time)).copied().unwrap_or(1) != 0 {
+                    if re_time_on_w_mask
+                        .get(idx(k, q, kw_time))
+                        .copied()
+                        .unwrap_or(1)
+                        != 0
+                    {
                         let b = gamma_w_time[idx(k, q, kw_time)].abs().max(1e-6);
                         let inv_t2 = rng.rinv_gaussian(psem_lambda2.sqrt() / b, psem_lambda2);
-                        psem_tau2_wt[idx(k, q, kw_time)] = (1.0 / inv_t2.max(1e-8)).clamp(1e-6, 1e6);
+                        psem_tau2_wt[idx(k, q, kw_time)] =
+                            (1.0 / inv_t2.max(1e-8)).clamp(1e-6, 1e6);
                         sum_tau2 += psem_tau2_wt[idx(k, q, kw_time)];
                         n_pen += 1;
                     }
@@ -1037,7 +1064,12 @@ pub fn mcmc_crossclassified(
             }
             for q in 0..q_time {
                 for k in 0..kw_time {
-                    if re_time_on_w_mask.get(idx(k, q, kw_time)).copied().unwrap_or(1) != 0 {
+                    if re_time_on_w_mask
+                        .get(idx(k, q, kw_time))
+                        .copied()
+                        .unwrap_or(1)
+                        != 0
+                    {
                         draws[idx(keep_pos, cur, n_keep)] = gamma_w_time[idx(k, q, kw_time)];
                         cur += 1;
                     }

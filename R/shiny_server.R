@@ -390,7 +390,7 @@ utils::globalVariables(".data")
   output$tinterval_diag_ui <- shiny::renderUI({
     df <- analysis_data()
     if (is.null(df) || !isTRUE(input$use_tinterval)) return(NULL)
-    info <- attr(df, "tinterval")
+    info <- attr(df, "tinterval_info")
     if (is.null(info)) return(NULL)
     shiny::tags$div(
       class = "alert alert-info py-2 small mb-2",
@@ -598,6 +598,7 @@ utils::globalVariables(".data")
     if (!nzchar(eq)) return(shiny::tags$p(class = "text-muted fst-italic", "Compile a valid model to preview equations."))
     # Normalize LaTeX helpers for MathJax 2 rendering while preserving pure LaTeX in builder_eq_tex
     eq_mj <- gsub("\\\\boldsymbol\\{([^}]+)\\}", "\\\\mathbf{\\1}", eq)
+    eq_mj <- gsub("\\\\mathcal\\{N\\}", "\\\\mathrm{N}", eq_mj)
     eq_mj <- gsub("\\\\text\\{([^}]*)\\\\_([^}]*)\\}", "\\\\text{\\1_\\2}", eq_mj)
     eq_mj <- gsub("\\\\!", "", eq_mj, fixed = TRUE)
     wrapped <- if (grepl("\\\\begin\\{align", eq_mj)) eq_mj else sprintf("$$%s$$", eq_mj)

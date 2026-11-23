@@ -297,7 +297,9 @@ fn dsem_rust_threelevel(
     hyper: Vec<f64>,
 ) -> std::result::Result<List, Error> {
     if dims.len() < 11 || hyper.is_empty() {
-        return Err(Error::Other("invalid threelevel dims or hyper length".into()));
+        return Err(Error::Other(
+            "invalid threelevel dims or hyper length".into(),
+        ));
     }
     let g3_cnt = dims[0] as usize;
     let d = dims[1] as usize;
@@ -414,9 +416,8 @@ fn dsem_rust_crossclassified(
     let sl_id = &masks[0..n_sl_tot];
     let sl_tm = &masks[n_sl_tot..(2 * n_sl_tot)];
     let lv_m = &masks[(2 * n_sl_tot)..base_len];
-    let q_id = d
-        + sl_id.iter().filter(|&&v| v != 0).count()
-        + lv_m.iter().filter(|&&v| v != 0).count();
+    let q_id =
+        d + sl_id.iter().filter(|&&v| v != 0).count() + lv_m.iter().filter(|&&v| v != 0).count();
     let q_time = d + sl_tm.iter().filter(|&&v| v != 0).count();
     let extra = &masks[base_len..];
     let re_id_on_w_mask: Vec<i32> = if extra.len() >= kw_id * q_id {
@@ -1086,7 +1087,9 @@ mod tests {
                 y_prev = y_cur;
             }
         }
-        let out_a = arma::mcmc_arma11(&y_arma, &[40; 10], true, 0.01, 1, 0.98, false, 160, 80, 1, 11);
+        let out_a = arma::mcmc_arma11(
+            &y_arma, &[40; 10], true, 0.01, 1, 0.98, false, 160, 80, 1, 11,
+        );
         assert_eq!(out_a.param_count, 7);
         assert_eq!(out_a.draws.len(), 80 * 7);
         assert!(out_a.dic.is_finite());
@@ -1107,7 +1110,8 @@ mod tests {
             }
         }
         let out_cfa = cc_dynamic_cfa::mcmc_cc_dynamic_cfa(
-            &y_cfa, n_id, n_t, p, true, true, true, true, false, true, 0, 0.98, false, 120, 60, 1, 22,
+            &y_cfa, n_id, n_t, p, true, true, true, true, false, true, 0, 0.98, false, 120, 60, 1,
+            22,
         );
         assert_eq!(out_cfa.draws.len(), 60 * out_cfa.param_count);
         assert!(out_cfa.dic.is_finite());
@@ -1131,7 +1135,22 @@ mod tests {
             y_ct[n_ct + i] = c1;
             prev = [c0, c1];
         }
-        let out_ct = ct_dsem::mcmc_ct_dsem(&y_ct, &[], &t_ct, &[n_ct], 2, 0, false, false, 0, 10.0, 140, 70, 1, 33);
+        let out_ct = ct_dsem::mcmc_ct_dsem(
+            &y_ct,
+            &[],
+            &t_ct,
+            &[n_ct],
+            2,
+            0,
+            false,
+            false,
+            0,
+            10.0,
+            140,
+            70,
+            1,
+            33,
+        );
         assert_eq!(out_ct.draws.len(), 70 * out_ct.param_count);
         assert!(out_ct.dic.is_finite());
     }
