@@ -656,12 +656,17 @@
         ),
         shiny::uiOutput("fit_kpi_strip"),
         bslib::card(
+          fill = FALSE,
           bslib::card_header("MCMC Diagnostic Visualizations"),
-          bslib::navset_card_tab(
-            bslib::nav_panel("Trace Plots", shiny::plotOutput("diag_trace_plot", height = "340px")),
-            bslib::nav_panel("Posterior Densities", shiny::plotOutput("diag_density_plot", height = "340px")),
-            bslib::nav_panel("Autocorrelation (ACF)", shiny::plotOutput("diag_acf_plot", height = "340px")),
-            bslib::nav_panel("Credible Intervals", shiny::plotOutput("diag_interval_plot", height = "340px"))
+          bslib::card_body(
+            fill = FALSE,
+            shiny::uiOutput("diag_params_ui"),
+            bslib::navset_tab(
+              bslib::nav_panel("Trace Plots", shiny::div(class = "pt-2", shiny::plotOutput("diag_trace_plot", height = "420px"))),
+              bslib::nav_panel("Posterior Densities", shiny::div(class = "pt-2", shiny::plotOutput("diag_density_plot", height = "420px"))),
+              bslib::nav_panel("Autocorrelation (ACF)", shiny::div(class = "pt-2", shiny::plotOutput("diag_acf_plot", height = "420px"))),
+              bslib::nav_panel("Credible Intervals", shiny::div(class = "pt-2", shiny::plotOutput("diag_interval_plot", height = "440px")))
+            )
           )
         ),
         bslib::layout_columns(
@@ -700,12 +705,14 @@
             shiny::checkboxInput("show_cluster_std", "Include cluster-specific STDYX preview", FALSE)
           ),
           bslib::layout_columns(
-            col_widths = c(8, 4),
+            col_widths = c(7, 5),
             bslib::card(
+              fill = FALSE,
               bslib::card_header("Publication-Ready Parameter Table (APA 7th Ed.)"),
               shiny::div(class = "dsem-table-wrap", shiny::uiOutput("apa_html_table"))
             ),
             bslib::card(
+              fill = FALSE,
               bslib::card_header("Within & Between Bayesian R-Squared"),
               shiny::div(class = "dsem-table-wrap", shiny::uiOutput("r2_table_ui"))
             )

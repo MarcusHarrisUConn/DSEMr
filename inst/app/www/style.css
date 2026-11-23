@@ -318,3 +318,50 @@ table.dsem-apa-table thead th {
   background: #131d26;
   border-color: #2c3e4c;
 }
+
+.alert-info {
+  background-color: #e8f1f3;
+  border-color: #b7d0d6;
+  color: #1c3a44;
+}
+
+[data-bs-theme="dark"] .alert-info {
+  background-color: #1a2d36;
+  border-color: #2d4d5b;
+  color: #d6eaef;
+}
+
+.alert-warning {
+  background-color: #fbf3e0;
+  border-color: #e5cb8d;
+  color: #5c4308;
+}
+
+[data-bs-theme="dark"] .alert-warning {
+  background-color: #332914;
+  border-color: #6b541f;
+  color: #f3dfae;
+}
+
+.nav-underline .nav-link,
+.nav-tabs .nav-link {
+  color: var(--dsem-navy);
+  font-weight: 600;
+}
+
+.nav-underline .nav-link.active,
+.nav-tabs .nav-link.active {
+  color: var(--dsem-ink);
+  border-bottom-color: var(--dsem-gold);
+}
+
+[data-bs-theme="dark"] .nav-underline .nav-link,
+[data-bs-theme="dark"] .nav-tabs .nav-link {
+  color: #c5d6df;
+}
+
+[data-bs-theme="dark"] .nav-underline .nav-link.active,
+[data-bs-theme="dark"] .nav-tabs .nav-link.active {
+  color: #ffffff;
+  border-bottom-color: var(--dsem-gold);
+}

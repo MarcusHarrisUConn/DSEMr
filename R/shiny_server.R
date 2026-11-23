@@ -1,4 +1,5 @@
 # Reactive server logic for the DSEMr Shiny studio
+utils::globalVariables(".data")
 
 .dsem_df_to_html <- function(df, digits = 3L, max_rows = 120L, caption = NULL) {
   if (is.null(df) || !is.data.frame(df) || !nrow(df)) {
@@ -6,8 +7,15 @@
   }
   show_df <- utils::head(df, max_rows)
   fmt_col <- function(v) {
-    if (is.numeric(v)) {
-      ifelse(is.na(v), "", formatC(v, digits = digits, format = "f"))
+    if (is.integer(v)) {
+      ifelse(is.na(v), "", as.character(v))
+    } else if (is.numeric(v)) {
+      fin <- v[is.finite(v)]
+      if (length(fin) && all(abs(fin - round(fin)) < 1e-9)) {
+        ifelse(is.na(v), "", formatC(round(v), digits = 0L, format = "f"))
+      } else {
+        ifelse(is.na(v), "", formatC(v, digits = digits, format = "f"))
+      }
     } else {
       ifelse(is.na(v), "", as.character(v))
     }
@@ -233,23 +241,56 @@
   selected_ids <- shiny::reactive({
     lt <- input$level_type
     if (identical(lt, "single")) return(NULL)
-    if (identical(lt, "threelevel")) {
-      if (is.null(input$id_col) || is.null(input$id_l3_col)) return(NULL)
-      return(c(input$id_col, input$id_l3_col))
+    cols <- col_names()
+    m <- active_meta()
+    id1 <- if (!is.null(input$id_col) && nzchar(input$id_col) && input$id_col %in% cols) {
+      input$id_col
+    } else if (!is.null(m) && nzchar(m$id) && m$id %in% cols) {
+      m$id
+    } else {
+      NULL
     }
-    if (is.null(input$id_col) || !nzchar(input$id_col)) NULL else input$id_col
+    if (identical(lt, "threelevel")) {
+      id3 <- if (!is.null(input$id_l3_col) && nzchar(input$id_l3_col) && input$id_l3_col %in% cols) {
+        input$id_l3_col
+      } else if (!is.null(m) && nzchar(m$id_l3) && m$id_l3 %in% cols) {
+        m$id_l3
+      } else {
+        NULL
+      }
+      if (is.null(id1) || is.null(id3)) return(NULL)
+      return(c(id1, id3))
+    }
+    id1
+  })
+
+  selected_time <- shiny::reactive({
+    cols <- col_names()
+    m <- active_meta()
+    if (!is.null(input$time_col) && nzchar(input$time_col) && input$time_col %in% cols) {
+      input$time_col
+    } else if (!is.null(m) && nzchar(m$time) && m$time %in% cols) {
+      m$time
+    } else if ("time" %in% cols) {
+      "time"
+    } else if (length(cols)) {
+      cols[1L]
+    } else {
+      NULL
+    }
   })
 
   analysis_data <- shiny::reactive({
     df <- raw_data()
     if (is.null(df)) return(NULL)
-    if (isTRUE(input$use_tinterval) && !is.null(input$time_col) && input$time_col %in% names(df)) {
+    tc <- selected_time()
+    if (isTRUE(input$use_tinterval) && !is.null(tc) && tc %in% names(df)) {
       delta <- input$tinterval_delta
       if (is.numeric(delta) && length(delta) == 1L && is.finite(delta) && delta > 0) {
         id_arg <- selected_ids()
         id_ti <- if (length(id_arg) >= 1L) id_arg[1L] else NULL
         aligned <- tryCatch(
-          dsem_tinterval(df, time = input$time_col, delta = delta, id = id_ti),
+          dsem_tinterval(df, time = tc, delta = delta, id = id_ti),
           error = function(e) df
         )
         return(aligned)
@@ -273,7 +314,8 @@
     } else {
       n_rows
     }
-    miss_pct <- 100 * mean(is.na(df))
+    vis_cols <- setdiff(names(df), ".dsem_bin")
+    miss_pct <- 100 * mean(is.na(df[, vis_cols, drop = FALSE]))
     shiny::div(
       class = "kpi-grid",
       shiny::div(class = "kpi-card", shiny::div(class = "kpi-label", "Observations"), shiny::div(class = "kpi-value", format(n_rows, big.mark = ","))),
@@ -284,39 +326,43 @@
   })
 
   output$traj_var_ui <- shiny::renderUI({
-    nc <- setdiff(num_cols(), c(selected_ids(), input$time_col))
+    nc <- setdiff(num_cols(), c(selected_ids(), selected_time()))
     if (!length(nc)) nc <- num_cols()
     shiny::selectInput("traj_var", "Variable to visualize", choices = nc, selected = nc[1L], width = "240px")
   })
 
   output$trajectory_plot <- shiny::renderPlot({
     df <- raw_data()
-    shiny::req(df, input$traj_var, input$time_col)
-    if (!all(c(input$traj_var, input$time_col) %in% names(df))) return(NULL)
+    shiny::req(df)
+    tc <- selected_time()
+    nc <- setdiff(num_cols(), c(selected_ids(), tc))
+    if (!length(nc)) nc <- num_cols()
+    tv <- if (!is.null(input$traj_var) && input$traj_var %in% names(df)) input$traj_var else nc[1L]
+    shiny::req(tc, tv, tc %in% names(df), tv %in% names(df))
     ids <- selected_ids()
     pdat <- data.frame(
-      time_v = as.numeric(df[[input$time_col]]),
-      val_v = as.numeric(df[[input$traj_var]])
+      time_v = as.numeric(df[[tc]]),
+      val_v = as.numeric(df[[tv]])
     )
     if (!is.null(ids) && ids[1L] %in% names(df)) {
       pdat$grp_v <- as.factor(df[[ids[1L]]])
       keep_cl <- utils::head(unique(pdat$grp_v), 12L)
       pdat <- pdat[pdat$grp_v %in% keep_cl & is.finite(pdat$val_v) & is.finite(pdat$time_v), , drop = FALSE]
-      ggplot2::ggplot(pdat, ggplot2::aes(x = ggplot2::.data[["time_v"]], y = ggplot2::.data[["val_v"]],
-                                         group = ggplot2::.data[["grp_v"]], color = ggplot2::.data[["grp_v"]])) +
-        ggplot2::geom_line(alpha = 0.72, linewidth = 0.7) +
-        ggplot2::geom_point(size = 1.2, alpha = 0.75) +
-        ggplot2::labs(x = input$time_col, y = input$traj_var,
-                      title = sprintf("Sample Cluster Trajectories (up to 12 clusters) for %s", input$traj_var)) +
+      ggplot2::ggplot(pdat, ggplot2::aes(x = .data[["time_v"]], y = .data[["val_v"]],
+                                         group = .data[["grp_v"]], color = .data[["grp_v"]])) +
+        ggplot2::geom_line(alpha = 0.72, linewidth = 0.75) +
+        ggplot2::geom_point(size = 1.3, alpha = 0.8) +
+        ggplot2::labs(x = tc, y = tv,
+                      title = sprintf("Sample Cluster Trajectories (up to 12 clusters) for %s", tv)) +
         ggplot2::theme_minimal(base_size = 12) +
         ggplot2::theme(legend.position = "none")
     } else {
       pdat <- pdat[is.finite(pdat$val_v) & is.finite(pdat$time_v), , drop = FALSE]
-      ggplot2::ggplot(pdat, ggplot2::aes(x = ggplot2::.data[["time_v"]], y = ggplot2::.data[["val_v"]])) +
+      ggplot2::ggplot(pdat, ggplot2::aes(x = .data[["time_v"]], y = .data[["val_v"]])) +
         ggplot2::geom_line(color = "#264653", linewidth = 0.85) +
         ggplot2::geom_point(color = "#3f6f78", size = 1.3) +
-        ggplot2::labs(x = input$time_col, y = input$traj_var,
-                      title = sprintf("Time Series Trajectory: %s", input$traj_var)) +
+        ggplot2::labs(x = tc, y = tv,
+                      title = sprintf("Time Series Trajectory: %s", tv)) +
         ggplot2::theme_minimal(base_size = 12)
     }
   })
@@ -324,20 +370,21 @@
   output$var_summary_table <- shiny::renderUI({
     df <- analysis_data()
     shiny::req(df)
-    rows <- lapply(names(df), function(nm) {
+    vis_nms <- setdiff(names(df), ".dsem_bin")
+    rows <- lapply(vis_nms, function(nm) {
       x <- df[[nm]]
       is_n <- is.numeric(x)
       data.frame(
         Variable = nm,
         Type = class(x)[1L],
-        Observed = sum(!is.na(x)),
-        Missing_Pct = round(100 * mean(is.na(x)), 1),
+        Observed = as.integer(sum(!is.na(x))),
+        `Miss %` = round(100 * mean(is.na(x)), 1),
         Mean = if (is_n) mean(x, na.rm = TRUE) else NA_real_,
         SD = if (is_n) stats::sd(x, na.rm = TRUE) else NA_real_,
-        stringsAsFactors = FALSE
+        stringsAsFactors = FALSE, check.names = FALSE
       )
     })
-    .dsem_df_to_html(do.call(rbind, rows), digits = 3L)
+    .dsem_df_to_html(do.call(rbind, rows), digits = 2L)
   })
 
   output$tinterval_diag_ui <- shiny::renderUI({
@@ -348,17 +395,20 @@
     shiny::tags$div(
       class = "alert alert-info py-2 small mb-2",
       sprintf("TINTERVAL aligned (delta = %g): %d observed rows expanded to %d grid rows (%d inserted missing grid cells).",
-              info$delta, info$n_observed, info$n_grid, info$n_inserted)
+              info$delta, info$observed_rows, info$total_grid_rows, info$inserted_missing_rows)
     )
   })
 
   output$data_preview_table <- shiny::renderUI({
-    .dsem_df_to_html(analysis_data(), digits = 3L, max_rows = 80L)
+    df <- analysis_data()
+    if (is.null(df)) return(NULL)
+    vis_nms <- setdiff(names(df), ".dsem_bin")
+    .dsem_df_to_html(df[, vis_nms, drop = FALSE], digits = 3L, max_rows = 80L)
   })
 
   # ---- 2. Model Builder UI selectors & live compilation ----
   model_vars <- shiny::reactive({
-    setdiff(num_cols(), c(selected_ids(), input$time_col))
+    setdiff(num_cols(), c(selected_ids(), selected_time()))
   })
 
   output$outcomes_ui <- shiny::renderUI({
@@ -397,10 +447,19 @@
   })
 
   guided_spec <- shiny::reactive({
-    outs <- input$outcomes
+    vars <- model_vars()
+    m <- active_meta()
+    outs <- if (length(input$outcomes)) {
+      input$outcomes
+    } else if (!is.null(m) && length(intersect(m$outcomes, vars))) {
+      intersect(m$outcomes, vars)
+    } else {
+      vars[1L]
+    }
     shiny::req(length(outs) >= 1L)
     lt <- input$level_type
     ids <- selected_ids()
+    tc <- selected_time()
     ti <- if (isTRUE(input$use_tinterval) && !isTRUE(input$continuous_time)) input$tinterval_delta else NULL
     cat_v <- if (!identical(input$outcome_family, "gaussian")) outs else character()
     ct_on <- isTRUE(input$continuous_time)
@@ -412,8 +471,8 @@
       lags = if (ct_on) 1L else parsed_lags(),
       level_type = lt,
       id = ids,
-      time = input$time_col,
-      time_cluster = if (identical(lt, "crossclassified")) input$time_col else NULL,
+      time = tc,
+      time_cluster = if (identical(lt, "crossclassified")) tc else NULL,
       random_slopes = !identical(lt, "single") && !ct_on && isTRUE(input$random_slopes),
       random_logv = !identical(lt, "single") && !ct_on && isTRUE(input$random_logv),
       random_residual_cov = !identical(lt, "single") && !ct_on && length(outs) >= 2L && isTRUE(input$random_res_cov),
@@ -449,12 +508,13 @@
         }
         flv <- if (!is.null(input$syntax_flavor)) input$syntax_flavor else "auto"
         ids <- selected_ids()
+        tc <- selected_time()
         ti <- if (isTRUE(input$use_tinterval) && !isTRUE(input$syntax_ct)) input$tinterval_delta else NULL
         m <- dsem_model(
           txt,
           syntax = flv,
           id = ids,
-          time = input$time_col,
+          time = tc,
           level_type = if (identical(flv, "mplus")) "auto" else input$level_type,
           tinterval = ti,
           continuous_time = isTRUE(input$syntax_ct)
@@ -536,7 +596,12 @@
   output$builder_equations_math <- shiny::renderUI({
     eq <- builder_eq_string()
     if (!nzchar(eq)) return(shiny::tags$p(class = "text-muted fst-italic", "Compile a valid model to preview equations."))
-    shiny::withMathJax(shiny::HTML(sprintf("$$%s$$", eq)))
+    # Normalize LaTeX helpers for MathJax 2 rendering while preserving pure LaTeX in builder_eq_tex
+    eq_mj <- gsub("\\\\boldsymbol\\{([^}]+)\\}", "\\\\mathbf{\\1}", eq)
+    eq_mj <- gsub("\\\\text\\{([^}]*)\\\\_([^}]*)\\}", "\\\\text{\\1_\\2}", eq_mj)
+    eq_mj <- gsub("\\\\!", "", eq_mj, fixed = TRUE)
+    wrapped <- if (grepl("\\\\begin\\{align", eq_mj)) eq_mj else sprintf("$$%s$$", eq_mj)
+    shiny::withMathJax(shiny::HTML(wrapped))
   })
 
   output$preview_lavaan_txt <- shiny::renderText({
@@ -654,24 +719,97 @@
     )
   })
 
+  output$diag_params_ui <- shiny::renderUI({
+    fit <- current_fit()
+    if (is.null(fit)) return(NULL)
+    p_all <- dimnames(fit$draws)[[2L]]
+    sel <- utils::head(p_all, 6L)
+    shiny::selectizeInput(
+      "diag_params", "Parameters to plot (up to 9 recommended)",
+      choices = p_all, selected = sel, multiple = TRUE, width = "100%"
+    )
+  })
+
+  diag_selected_params <- shiny::reactive({
+    fit <- current_fit()
+    shiny::req(fit)
+    p_all <- dimnames(fit$draws)[[2L]]
+    sel <- intersect(input$diag_params, p_all)
+    if (!length(sel)) utils::head(p_all, 6L) else sel
+  })
+
+  diag_draws_long <- shiny::reactive({
+    fit <- current_fit()
+    pars <- diag_selected_params()
+    dr <- fit$draws[, pars, , drop = FALSE]
+    n_it <- dim(dr)[1L]; n_p <- dim(dr)[2L]; n_ch <- dim(dr)[3L]
+    data.frame(
+      iteration = rep(seq_len(n_it), times = n_p * n_ch),
+      parameter = factor(rep(rep(pars, each = n_it), times = n_ch), levels = pars),
+      chain = factor(rep(paste("Chain", seq_len(n_ch)), each = n_it * n_p)),
+      value = as.numeric(dr)
+    )
+  })
+
   output$diag_trace_plot <- shiny::renderPlot({
-    fit <- current_fit(); shiny::req(fit)
-    plot(fit, type = "trace")
+    df <- diag_draws_long(); shiny::req(nrow(df) > 0L)
+    ggplot2::ggplot(df, ggplot2::aes(x = .data[["iteration"]], y = .data[["value"]], color = .data[["chain"]])) +
+      ggplot2::geom_line(alpha = 0.72, linewidth = 0.45) +
+      ggplot2::facet_wrap(~parameter, scales = "free_y") +
+      ggplot2::labs(x = "Post-Warmup Draw", y = "Value", color = NULL, title = "MCMC Trace Plots") +
+      ggplot2::theme_minimal(base_size = 11) +
+      ggplot2::theme(legend.position = "bottom")
   })
 
   output$diag_density_plot <- shiny::renderPlot({
-    fit <- current_fit(); shiny::req(fit)
-    plot(fit, type = "density")
+    df <- diag_draws_long(); shiny::req(nrow(df) > 0L)
+    ggplot2::ggplot(df, ggplot2::aes(x = .data[["value"]], color = .data[["chain"]], fill = .data[["chain"]])) +
+      ggplot2::geom_density(alpha = 0.22, linewidth = 0.65) +
+      ggplot2::facet_wrap(~parameter, scales = "free") +
+      ggplot2::labs(x = "Parameter Value", y = "Posterior Density", color = NULL, fill = NULL,
+                    title = "Posterior Marginal Densities by Chain") +
+      ggplot2::theme_minimal(base_size = 11) +
+      ggplot2::theme(legend.position = "bottom")
   })
 
   output$diag_acf_plot <- shiny::renderPlot({
-    fit <- current_fit(); shiny::req(fit)
-    plot(fit, type = "acf")
+    fit <- current_fit()
+    pars <- diag_selected_params()
+    dr <- fit$draws[, pars, , drop = FALSE]
+    n_it <- dim(dr)[1L]; n_ch <- dim(dr)[3L]
+    max_lag <- min(20L, max(1L, n_it - 2L))
+    rows <- lapply(pars, function(p) {
+      ac_mat <- vapply(seq_len(n_ch), function(ch) {
+        v <- dr[, p, ch]
+        if (stats::sd(v) < 1e-12) return(rep(0, max_lag))
+        as.numeric(stats::acf(v, lag.max = max_lag, plot = FALSE)$acf)[-1L]
+      }, numeric(max_lag))
+      ac_mean <- if (is.matrix(ac_mat)) rowMeans(ac_mat, na.rm = TRUE) else as.numeric(ac_mat)
+      data.frame(parameter = factor(p, levels = pars), lag = seq_len(max_lag), acf = ac_mean)
+    })
+    df <- do.call(rbind, rows)
+    ci_b <- 1.96 / sqrt(max(1, n_it * n_ch))
+    ggplot2::ggplot(df, ggplot2::aes(x = .data[["lag"]], y = .data[["acf"]])) +
+      ggplot2::geom_hline(yintercept = 0, color = "#5c6d7a") +
+      ggplot2::geom_hline(yintercept = c(-ci_b, ci_b), linetype = "dashed", color = "#7a4e48") +
+      ggplot2::geom_col(fill = "#3f6f78", width = 0.65) +
+      ggplot2::facet_wrap(~parameter) +
+      ggplot2::labs(x = "Lag", y = "Autocorrelation", title = "Chain-Averaged Autocorrelation (ACF)") +
+      ggplot2::theme_minimal(base_size = 11)
   })
 
   output$diag_interval_plot <- shiny::renderPlot({
     fit <- current_fit(); shiny::req(fit)
-    plot(fit, type = "intervals")
+    est <- fit$estimates
+    est$parameter <- factor(est$parameter, levels = rev(est$parameter))
+    ggplot2::ggplot(est, ggplot2::aes(x = .data[["mean"]], y = .data[["parameter"]])) +
+      ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "#7a4e48") +
+      ggplot2::geom_errorbar(ggplot2::aes(xmin = .data[["q2.5"]], xmax = .data[["q97.5"]]),
+                             width = 0.25, color = "#3f6f78", orientation = "y") +
+      ggplot2::geom_point(size = 2.4, color = "#264653") +
+      ggplot2::labs(x = "Posterior Mean & 95% Credible Interval", y = NULL,
+                    title = "Posterior Parameter Estimates & 95% CrI") +
+      ggplot2::theme_minimal(base_size = 11)
   })
 
   output$diag_full_table <- shiny::renderUI({
@@ -720,7 +858,15 @@
     if (is.null(r2_df) || !nrow(r2_df)) {
       return(shiny::tags$p(class = "text-muted small", "Bayesian R-squared not defined for this model type."))
     }
-    .dsem_df_to_html(r2_df, digits = 3L)
+    disp <- data.frame(
+      Level = r2_df$level,
+      Variable = r2_df$variable,
+      `R^2` = r2_df$mean,
+      SD = r2_df$sd,
+      `95% CrI` = sprintf("[%.3f, %.3f]", r2_df$q_lower, r2_df$q_upper),
+      stringsAsFactors = FALSE, check.names = FALSE
+    )
+    .dsem_df_to_html(disp, digits = 3L)
   })
 
   output$cluster_std_table <- shiny::renderUI({
@@ -751,9 +897,9 @@
     pc <- pcor_df_react()
     shiny::req(pc, nrow(pc) >= 1L)
     pc$pair <- paste0(pc$var1, " - ", pc$var2, " (", pc$level, ")")
-    ggplot2::ggplot(pc, ggplot2::aes(x = ggplot2::.data[["pcor_mean"]], y = ggplot2::.data[["pair"]])) +
+    ggplot2::ggplot(pc, ggplot2::aes(x = .data[["pcor_mean"]], y = .data[["pair"]])) +
       ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "#7a4e48") +
-      ggplot2::geom_errorbar(ggplot2::aes(xmin = ggplot2::.data[["pcor_q_lower"]], xmax = ggplot2::.data[["pcor_q_upper"]]),
+      ggplot2::geom_errorbar(ggplot2::aes(xmin = .data[["pcor_q_lower"]], xmax = .data[["pcor_q_upper"]]),
                              width = 0.2, color = "#3f6f78", orientation = "y") +
       ggplot2::geom_point(size = 2.8, color = "#264653") +
       ggplot2::labs(x = "Posterior Partial Correlation (95% CrI)", y = NULL,
@@ -838,9 +984,9 @@
     shiny::req(irf, is.data.frame(irf$data), nrow(irf$data) >= 1L)
     d <- irf$data
     d$panel <- paste0(d$impulse, " -> ", d$response)
-    ggplot2::ggplot(d, ggplot2::aes(x = ggplot2::.data[["horizon"]], y = ggplot2::.data[["q50"]])) +
+    ggplot2::ggplot(d, ggplot2::aes(x = .data[["horizon"]], y = .data[["q50"]])) +
       ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "#7a4e48") +
-      ggplot2::geom_ribbon(ggplot2::aes(ymin = ggplot2::.data[["q_lower"]], ymax = ggplot2::.data[["q_upper"]]),
+      ggplot2::geom_ribbon(ggplot2::aes(ymin = .data[["q_lower"]], ymax = .data[["q_upper"]]),
                            fill = "#6f9fa6", alpha = 0.28) +
       ggplot2::geom_line(color = "#264653", linewidth = 0.9) +
       ggplot2::facet_wrap(~panel, scales = "free_y") +
@@ -874,8 +1020,8 @@
     shiny::req(fs, is.data.frame(fs$ranking), nrow(fs$ranking) >= 1L)
     rk <- fs$ranking
     rk$rank_ord <- seq_len(nrow(rk))
-    ggplot2::ggplot(rk, ggplot2::aes(x = ggplot2::.data[["rank_ord"]], y = ggplot2::.data[["mean"]])) +
-      ggplot2::geom_errorbar(ggplot2::aes(ymin = ggplot2::.data[["q_lower"]], ymax = ggplot2::.data[["q_upper"]]),
+    ggplot2::ggplot(rk, ggplot2::aes(x = .data[["rank_ord"]], y = .data[["mean"]])) +
+      ggplot2::geom_errorbar(ggplot2::aes(ymin = .data[["q_lower"]], ymax = .data[["q_upper"]]),
                              width = 0.25, color = "#6f9fa6") +
       ggplot2::geom_point(size = 2.0, color = "#264653") +
       ggplot2::labs(x = "Cluster Rank (Lowest to Highest)", y = paste("Posterior", fs$parameter),
