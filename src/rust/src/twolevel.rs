@@ -988,8 +988,7 @@ pub fn mcmc_twolevel(
                             // Exact stationary initial observation contribution for short-T univariate AR(1) DSEM2 & RDSEM2 (Asparouhov 2026)
                             if d == 1
                                 && n_lags == 1
-                                && ((latent_center_y && !residual_dynamics && kx == 0)
-                                    || residual_dynamics)
+                                && (residual_dynamics || (latent_center_y && kx == 0))
                             {
                                 let phi = slopes_g[0].clamp(-0.98, 0.98);
                                 let w0 = (1.0 - phi * phi).max(0.02) / s2;
@@ -1211,11 +1210,8 @@ pub fn mcmc_twolevel(
                     let use_stat_mh = d == 1
                         && n_lags == 1
                         && slope_re_idx[0] >= 0
-                        && ((latent_center_y
-                            && !residual_dynamics
-                            && kx == 0
-                            && n_rand_slopes == 1)
-                            || residual_dynamics);
+                        && (residual_dynamics
+                            || (latent_center_y && kx == 0 && n_rand_slopes == 1));
                     if use_stat_mh {
                         // First commit any random exogenous slopes in RDSEM2, then MH-check the AR(1) slope
                         for (s, &sv) in sl_draw.iter().enumerate().take(n_rand_slopes) {
@@ -1319,9 +1315,7 @@ pub fn mcmc_twolevel(
                         rss_j += err * err;
                     }
                     let mut n_cnt = n_eff_g as f64;
-                    if d == 1
-                        && n_lags == 1
-                        && ((latent_center_y && !residual_dynamics && kx == 0) || residual_dynamics)
+                    if d == 1 && n_lags == 1 && (residual_dynamics || (latent_center_y && kx == 0))
                     {
                         let phi = slopes_g[0].clamp(-0.98, 0.98);
                         let mut e0 = y_work[idx(st, 0, n_obs)] - mu_gj;
@@ -1613,7 +1607,7 @@ pub fn mcmc_twolevel(
                 && n_lags == 1
                 && n_fixed_slopes == 1
                 && fixed_slope_idx[0] == 0
-                && ((latent_center_y && !residual_dynamics && kx == 0) || residual_dynamics)
+                && (residual_dynamics || (latent_center_y && kx == 0))
             {
                 let phi_c = fixed_slopes[0];
                 let phi_p = fs_prop[0];
@@ -1754,8 +1748,7 @@ pub fn mcmc_twolevel(
                         let mu_gj = theta[idx(g, j, g_cnt)];
                         if d == 1
                             && n_lags == 1
-                            && ((latent_center_y && !residual_dynamics && kx == 0)
-                                || residual_dynamics)
+                            && (residual_dynamics || (latent_center_y && kx == 0))
                         {
                             let phi = slopes_g[0].clamp(-0.98, 0.98);
                             let mut e0 = y_work[idx(st, 0, n_obs)] - mu_gj;
@@ -2000,8 +1993,7 @@ pub fn mcmc_twolevel(
                             let mut n_cnt = n_eff_g as f64;
                             if d == 1
                                 && n_lags == 1
-                                && ((latent_center_y && !residual_dynamics && kx == 0)
-                                    || residual_dynamics)
+                                && (residual_dynamics || (latent_center_y && kx == 0))
                             {
                                 let phi = slopes_g[0].clamp(-0.98, 0.98);
                                 let mut e0 = y_work[idx(st, 0, n_obs)] - mu_gj;
