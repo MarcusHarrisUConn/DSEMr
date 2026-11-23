@@ -54,5 +54,5 @@ jobs:
       - run: cargo fmt --manifest-path src/rust/Cargo.toml -- --check
       - run: cargo clippy --manifest-path rust/Cargo.toml --offline --locked --all-targets -- -D warnings
         working-directory: src
-      - run: cargo test --manifest-path rust/Cargo.toml --offline --locked
+      - run: LD_LIBRARY_PATH="$(R RHOME)/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" cargo test --manifest-path rust/Cargo.toml --offline --locked
         working-directory: src
